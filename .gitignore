@@ -1,0 +1,11 @@
+# 本機資料庫與測試資料
+*.db
+*.db-journal
+__pycache__/
+# 編譯產物
+prototype/build/
+# 編輯器／工具
+.DS_Store
+.claude/
+# 打包給朋友的 zip
+prototype/dist/

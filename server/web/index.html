@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhileAI 群組</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --faint: #9a9a94;
+    --line: #e4e4df; --accent: #2f6fed; --accent-soft: #e8efff; --ok: #1f9d55; --warn-soft: #fff4e0;
+    --bar: #d9d9d3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --card: #20201e; --text: #ededea; --muted: #a3a39d; --faint: #75756f;
+      --line: #33332f; --accent: #6b9bff; --accent-soft: #24304a; --ok: #4cc283; --warn-soft: #3a3020;
+      --bar: #3a3a36;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.55 -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 64px; }
+  header.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  header.top a { color: var(--text); text-decoration: none; font-weight: 700; font-size: 17px; }
+  header.top .who { color: var(--muted); font-size: 13px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 28px 0 10px; color: var(--muted); font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 12px; }
+  .muted { color: var(--muted); } .faint { color: var(--faint); font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input, select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+                  border-radius: 10px; padding: 9px 12px; width: 100%; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { font: inherit; border: 0; border-radius: 10px; padding: 9px 16px; cursor: pointer;
+           background: var(--accent); color: #fff; font-weight: 600; }
+  button.ghost { background: transparent; color: var(--accent); padding: 6px 8px; }
+  button.secondary { background: var(--accent-soft); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .opt { display: block; width: 100%; text-align: left; background: var(--bg); color: var(--text);
+         border: 1px solid var(--line); font-weight: 500; margin-top: 8px; }
+  .opt:hover { border-color: var(--accent); }
+  .group-link { display: flex; justify-content: space-between; align-items: center; text-decoration: none; color: inherit; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); }
+  .badge.done { background: transparent; color: var(--ok); padding: 0; }
+  .bar { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; margin: 3px 0 9px; }
+  .bar > i { display: block; height: 100%; background: var(--bar); border-radius: 99px; }
+  .bar.mine > i { background: var(--accent); }
+  .q-meta { font-size: 12px; color: var(--faint); margin-bottom: 6px; }
+  .q-text { font-weight: 650; font-size: 16px; margin-bottom: 4px; }
+  .hint { background: var(--warn-soft); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+  .invite { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1px; }
+  .opts-edit .row { flex-wrap: nowrap; margin-bottom: 8px; }
+  .error { color: #d64545; font-size: 13px; min-height: 1em; margin-top: 6px; }
+  .tabs { display: flex; gap: 4px; margin: 20px 0 4px; }
+  .tabs button { background: transparent; color: var(--muted); padding: 6px 12px; }
+  .tabs button.on { background: var(--card); color: var(--text); border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<main id="app"><p class="muted">載入中…</p></main>
+<script>
+const $app = document.getElementById('app');
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// 本機只存一組隨機 token（身分），讀寫失敗時退回記憶體
+let memToken = null;
+const tokenStore = {
+  get() { try { return localStorage.getItem('whileai_token') || memToken; } catch { return memToken; } },
+  set(t) { memToken = t; try { localStorage.setItem('whileai_token', t); } catch {} },
+};
+
+async function api(method, path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  const t = tokenStore.get();
+  if (t) headers.Authorization = 'Bearer ' + t;
+  const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || '發生錯誤'), { status: r.status });
+  return data;
+}
+
+function go(path) { history.pushState(null, '', path); render(); }
+window.addEventListener('popstate', render);
+document.addEventListener('click', e => {
+  const a = e.target.closest('a[data-nav]');
+  if (a) { e.preventDefault(); go(a.getAttribute('href')); }
+});
+
+function timeLeft(ts) {
+  const s = ts - Date.now() / 1000;
+  if (s <= 0) return '已截止';
+  if (s < 3600) return `剩 ${Math.ceil(s / 60)} 分鐘`;
+  if (s < 86400) return `剩 ${Math.round(s / 3600)} 小時`;
+  return `剩 ${Math.round(s / 86400)} 天`;
+}
+
+let me = null;
+
+async function render() {
+  const url = new URL(location.href);
+
+  // App 送來的一次性登入碼：換成網頁自己的 token 後，立刻從網址移除
+  const handoff = url.searchParams.get('handoff');
+  if (handoff) {
+    try { const r = await api('POST', '/api/handoff/redeem', { code: handoff }); tokenStore.set(r.token); }
+    catch (e) { alert(e.message); }
+    url.searchParams.delete('handoff');
+    history.replaceState(null, '', url.pathname + url.search);
+  }
+
+  me = null;
+  if (tokenStore.get()) {
+    try { me = await api('GET', '/api/me'); } catch (e) { if (e.status !== 401) throw e; }
+  }
+
+  const path = location.pathname;
+  let m;
+  if ((m = path.match(/^\/j\/([A-Za-z0-9]+)$/))) return renderJoin(m[1].toUpperCase());
+  if (!me) return renderOnboarding();
+  if ((m = path.match(/^\/g\/(\d+)$/))) return renderGroup(+m[1]);
+  return renderHome();
+}
+
+function topBar() {
+  return `<header class="top"><a href="/" data-nav>⏳ WhileAI</a>
+    ${me ? `<span class="who">${esc(me.user.name)}</span>` : ''}</header>`;
+}
+
+function nameField(id = 'name') {
+  return `<input id="${id}" maxlength="24" placeholder="你的暱稱（出題時會顯示）" autocomplete="nickname">`;
+}
+
+async function ensureUser(name) {
+  if (me) return;
+  const r = await api('POST', '/api/users', { name });
+  tokenStore.set(r.token);
+  me = await api('GET', '/api/me');
+}
+
+// ---------- 首次使用 ----------
+function renderOnboarding() {
+  $app.innerHTML = `${topBar()}
+    <h1>在等 AI 的空檔，問問你的同伴</h1>
+    <p class="muted">建立群組、互相出題。題目會在大家等 Codex 時出現，答案完全匿名。</p>
+    <div class="card">${nameField()}
+      <div class="row" style="margin-top:10px"><button id="start">開始</button></div>
+      <div class="error" id="err"></div></div>
+    <p class="faint">免註冊：我們只在這個瀏覽器存一組隨機身分碼。</p>`;
+  document.getElementById('start').onclick = async () => {
+    try { await ensureUser(document.getElementById('name').value); render(); }
+    catch (e) { document.getElementById('err').textContent = e.message; }
+  };
+}
+
+// ---------- 首頁：我的群組 ----------
+function renderHome() {
+  const groups = me.groups;
+  $app.innerHTML = `${topBar()}
+    <h1>我的群組</h1>
+    ${groups.length ? '' : '<p class="muted">還沒有群組。建立一個，把邀請連結貼給同事。</p>'}
+    ${groups.map(g => `<a class="card group-link" href="/g/${g.id}" data-nav>
+        <span><b>${esc(g.name)}</b><br><span class="faint">${g.member_count} 人${g.muted ? ' · 已靜音' : ''}</span></span>
+        <span class="muted">→</span></a>`).join('')}
+    <h2>建立新群組</h2>
+    <div class="card"><div class="row" style="flex-wrap:nowrap">
+      <input id="gname" maxlength="40" placeholder="例如：後端組、某某社群">
+      <button id="create" style="white-space:nowrap">建立</button></div>
+      <div class="error" id="err"></div></div>
+    <h2>有邀請碼？</h2>
+    <div class="card"><div class="row" style="flex-wrap:nowrap">
+      <input id="code" maxlength="8" placeholder="8 碼邀請碼" class="invite">
+      <button class="secondary" id="join" style="white-space:nowrap">加入</button></div></div>`;
+  document.getElementById('create').onclick = async () => {
+    try { const r = await api('POST', '/api/groups', { name: document.getElementById('gname').value }); go('/g/' + r.group.id); }
+    catch (e) { document.getElementById('err').textContent = e.message; }
+  };
+  document.getElementById('join').onclick = () => {
+    const c = document.getElementById('code').value.trim();
+    if (c) go('/j/' + c.toUpperCase());
+  };
+}
+
+// ---------- 邀請頁 ----------
+async function renderJoin(code) {
+  let info;
+  try { info = await api('GET', '/api/invites/' + code); }
+  catch (e) { $app.innerHTML = `${topBar()}<div class="card">${esc(e.message)}</div>`; return; }
+  const already = me && me.groups.find(g => g.invite_code === code);
+  if (already) return go('/g/' + already.id);
+  $app.innerHTML = `${topBar()}
+    <p class="muted">你被邀請加入</p>
+    <h1>${esc(info.name)}</h1>
+    <p class="muted">${info.member_count} 位成員 · 互相出題，答案匿名</p>
+    <div class="card">
+      ${me ? '' : nameField()}
+      <div class="row" style="margin-top:10px">
+        <button id="join">用網頁加入</button>
+        <a href="whileai://join/${esc(code)}"><button class="secondary" type="button">在 WhileAI App 中加入</button></a>
+      </div>
+      <div class="error" id="err"></div>
+    </div>
+    <p class="faint">裝了 WhileAI 的 Mac App，題目會在你等 Codex 的空檔自動出現，不必打開網頁。</p>`;
+  document.getElementById('join').onclick = async () => {
+    try {
+      if (!me) await ensureUser(document.getElementById('name').value);
+      const r = await api('POST', `/api/invites/${code}/join`);
+      go('/g/' + r.group.id);
+    } catch (e) { document.getElementById('err').textContent = e.message; }
+  };
+}
+
+// ---------- 群組頁 ----------
+let tab = 'open';
+
+async function renderGroup(gid) {
+  let data;
+  try { data = await api('GET', '/api/groups/' + gid); }
+  catch (e) { $app.innerHTML = `${topBar()}<div class="card">${esc(e.message)}</div>`; return; }
+  const { group: g, questions } = data;
+  const open = questions.filter(q => !q.closed);
+  const closed = questions.filter(q => q.closed);
+  const list = tab === 'open' ? open : closed;
+
+  $app.innerHTML = `${topBar()}
+    <h1>${esc(g.name)}</h1>
+    <p class="muted" style="margin-top:0">${g.member_count} 位成員 · 答案匿名 · ≥3 人回答才公開結果</p>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <span>邀請碼 <b class="invite">${esc(g.invite_code)}</b></span>
+        <span class="row"><button class="secondary" id="copy">複製邀請連結</button>
+        <button class="ghost" id="mute">${g.muted ? '取消靜音' : '靜音'}</button></span>
+      </div>
+    </div>
+
+    <h2>出題</h2>
+    <div class="card" id="ask">
+      <input id="qtext" maxlength="120" placeholder="想問大家什麼？例如：下個 sprint 要不要統一改用 Codex？">
+      <div class="opts-edit" id="opts" style="margin-top:10px"></div>
+      <div class="row" style="justify-content:space-between">
+        <button class="ghost" id="addopt">＋ 新增選項</button>
+        <span class="row"><select id="hours" style="width:auto">
+          <option value="4">4 小時後截止</option><option value="24" selected>24 小時後截止</option>
+          <option value="48">48 小時後截止</option><option value="72">3 天後截止</option></select>
+        <button id="send">發問</button></span>
+      </div>
+      <div class="error" id="err"></div>
+    </div>
+
+    <div class="tabs">
+      <button data-tab="open" class="${tab === 'open' ? 'on' : ''}">進行中（${open.length}）</button>
+      <button data-tab="closed" class="${tab === 'closed' ? 'on' : ''}">已開獎（${closed.length}）</button>
+    </div>
+    ${list.length ? list.map(questionCard).join('') : `<p class="muted">${tab === 'open' ? '目前沒有進行中的題目。' : '還沒有開獎的題目。'}</p>`}`;
+
+  // 選項編輯器：2–4 個
+  let opts = ['', ''];
+  const drawOpts = () => {
+    document.getElementById('opts').innerHTML = opts.map((o, i) => `<div class="row">
+        <input data-opt="${i}" maxlength="40" placeholder="選項 ${i + 1}" value="${esc(o)}">
+        ${opts.length > 2 ? `<button class="ghost" data-del="${i}" aria-label="刪除">✕</button>` : ''}</div>`).join('');
+    document.getElementById('addopt').disabled = opts.length >= 4;
+  };
+  drawOpts();
+  document.getElementById('opts').oninput = e => { if (e.target.dataset.opt) opts[+e.target.dataset.opt] = e.target.value; };
+  document.getElementById('opts').onclick = e => { const d = e.target.dataset.del; if (d !== undefined) { opts.splice(+d, 1); drawOpts(); } };
+  document.getElementById('addopt').onclick = () => { if (opts.length < 4) { opts.push(''); drawOpts(); } };
+  document.getElementById('send').onclick = async () => {
+    try {
+      await api('POST', `/api/groups/${gid}/questions`, {
+        text: document.getElementById('qtext').value,
+        options: opts.map(o => o.trim()).filter(Boolean),
+        hours: +document.getElementById('hours').value,
+      });
+      tab = 'open'; renderGroup(gid);
+    } catch (e) { document.getElementById('err').textContent = e.message; }
+  };
+
+  document.getElementById('copy').onclick = async e => {
+    try { await navigator.clipboard.writeText(g.invite_url); e.target.textContent = '已複製 ✓'; }
+    catch { prompt('複製這個連結：', g.invite_url); }
+  };
+  document.getElementById('mute').onclick = async () => {
+    await api('POST', `/api/groups/${gid}/mute`, { muted: !g.muted }); renderGroup(gid);
+  };
+  document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; renderGroup(gid); });
+  document.querySelectorAll('[data-vote]').forEach(b => b.onclick = async () => {
+    const [qid, opt] = b.dataset.vote.split(':').map(Number);
+    try { await api('POST', `/api/questions/${qid}/vote`, { option: opt }); renderGroup(gid); }
+    catch (e) { alert(e.message); renderGroup(gid); }
+  });
+}
+
+function questionCard(q) {
+  const meta = `<div class="q-meta">${esc(q.author_name)} 出題 · ${q.answered_count}／${q.member_count} 人已答 · ${q.closed ? '已開獎' : timeLeft(q.closes_at)}</div>`;
+  let body;
+  if (q.closed && q.results) {
+    const total = q.results.reduce((a, b) => a + b, 0) || 1;
+    body = q.options.map((o, i) => {
+      const pct = Math.round(q.results[i] / total * 100);
+      return `<div class="row" style="justify-content:space-between"><span>${esc(o)}${i === q.my_vote ? '（你）' : ''}</span>
+        <span class="muted">${pct}% · ${q.results[i]} 票</span></div>
+        <div class="bar ${i === q.my_vote ? 'mine' : ''}"><i style="width:${pct}%"></i></div>`;
+    }).join('');
+  } else if (q.closed) {
+    body = `<p class="muted">${esc(q.hidden_reason)}</p>`;
+  } else if (q.my_vote !== null) {
+    body = `<p class="badge done">✓ 你選了「${esc(q.options[q.my_vote])}」· 開獎時公布結果</p>`;
+  } else {
+    body = q.options.map((o, i) => `<button class="opt" data-vote="${q.id}:${i}">${esc(o)}</button>`).join('')
+      + `<p class="faint" style="margin:8px 0 0">匿名 · ≥3 人回答才公開</p>`;
+  }
+  return `<div class="card">${meta}<div class="q-text">${esc(q.text)}</div>${body}</div>`;
+}
+
+render().catch(e => { $app.innerHTML = `<div class="card">載入失敗：${esc(e.message)}</div>`; });
+</script>
+</body>
+</html>

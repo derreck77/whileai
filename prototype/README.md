@@ -1,0 +1,94 @@
+# WhileAI 原型 v0.2：群組 × 互相出題（macOS）
+
+群組成員可以互相出題。題目會在你等 Codex 超過幾秒時出現在右上角，點一下就答完；截止後，下一次等待時開獎。答案完全匿名。
+
+```
+Codex ──hooks──▶ WhileAI hook（只取事件名稱）──▶ WhileAI.app（選單列）──HTTP──▶ server/（API ＋ 網頁）
+                                                                                   ▲
+                                                           沒裝 App 的成員 ──網頁──┘
+```
+
+## 安裝
+
+```bash
+./install.sh
+./trust_hooks.py
+```
+
+- **`install.sh`：** 編譯 App 並放進 `~/Applications`；在 `~/.codex/hooks.json` 加入 4 個 hooks；設定登入時自動啟動，並立刻啟動一次。
+- **`trust_hooks.py`：** 透過 Codex 官方的 app-server 協定，信任 WhileAI 的 hooks，效果等同在 Codex CLI 輸入 `/hooks` 後按信任。只會動到 WhileAI 自己的 hooks。用 `--check` 可以只檢查狀態。
+- **後端：** App 連不上本機伺服器時，會自動啟動內附的後端，資料庫是 `~/.whileai/server.db`，所以不用另外開伺服器。
+
+第一次啟動時會請你設定暱稱。之後到選單列 ⏳ →「我的群組」→「建立新群組…」。
+
+### 支援哪些 Agent
+
+| Agent | 自動跳出題目 | 設定檔 |
+|---|---|---|
+| Codex CLI | ✅ 已實測 | `~/.codex/hooks.json`，需要信任（`trust_hooks.py`） |
+| Codex 桌面 App | 和 CLI 共用核心與設定，應該可以 | 同上 |
+| Claude Code（終端機、IDE、Claude 桌面 App） | ✅ 模擬事件已測試 | `~/.claude/settings.json`，自動生效 |
+| 雲端執行的 Agent（Codex 網頁版等） | ❌ 收不到事件；可以從選單列或網頁回答 | — |
+
+Claude Code 按 Esc 中斷時不會送出 `Stop`，所以 session 超過 45 分鐘沒有事件就視為已結束。卡片會依正在跑的 Agent 顯示「Codex 工作中」或「Claude Code 工作中」。
+
+想確認 Agent 有沒有送出事件，可以看 `~/.whileai/hooks.log`（只記時間和事件名稱）。
+
+### 移除
+
+```bash
+./uninstall.sh
+```
+
+`uninstall.sh` 會移除 App、兩邊的 hooks 和開機啟動。加上 `--purge` 會連 `~/.whileai` 一起刪除。`config.toml` 裡的 `hooks.state` 信任紀錄會留著，但 hooks 移除後就不會再作用。
+
+邀請連結目前是 `http://127.0.0.1:8787/j/<邀請碼>`，**只有你自己的電腦打得開**。要讓同事加入，後端必須先部署到公開網址。
+
+## App 怎麼決定顯示什麼
+
+| 時機 | 行為 |
+|---|---|
+| `UserPromptSubmit` | 先同步題目；任務超過 8 秒才顯示 |
+| 選題順序 | ① 還沒看過的開獎 ② 群組待答題（已靜音的群組不會出現） |
+| 每日上限 | 每天最多 5 道新題目，其餘留在選單列的「待答題」 |
+| 略過 | 這次等待內不再出現，下次等待會再出現 |
+| `PermissionRequest` | 立刻收起 |
+| `Stop`／`Interrupt` | 所有 session 都結束 → 顯示「✓ Codex 完成了」後收起 |
+
+## 選單列
+
+- **待答題、新開獎：** 點一下就能直接打開卡片（當天沒用 Agent 也能回答）。
+- **我的群組：** 每個群組可以「出題／看結果…」（會開網頁並自動登入）、複製邀請連結、靜音；也可以建立新群組、輸入邀請碼加入。
+- **其他：** 暫停 1 小時、打開本機資料夾。
+
+邀請連結 `whileai://join/<邀請碼>` 會直接用 App 加入群組。
+
+## 隱私
+
+- `WhileAI hook` 只讀 `hook_event_name` 和 `session_id`。prompt、程式碼、路徑一律不讀取。
+- 後端只回傳彙總票數，任何 API 都不會顯示誰選了什麼；回答不到 3 人不公開結果。
+- 從 App 開網頁時，網址帶的是 2 分鐘內有效的一次性碼，App 的 token 不會出現在網址上。
+- 本機資料都在 `~/.whileai/`：`identity.json`（身分）、`state.json`（看過的開獎、今日顯示紀錄）、`events.jsonl`（互動紀錄，用來驗證 H1／H2）。
+
+## 開發與測試
+
+```bash
+./build.sh
+python3 ../server/test_api.py
+python3 test_e2e.py
+./build/WhileAI.app/Contents/MacOS/WhileAI snapshot /tmp
+```
+
+- `test_api.py`：後端 API 測試。
+- `test_e2e.py`：真的啟動 App 和後端，用模擬的 hook 事件驅動。
+- `snapshot`：把卡片的各種狀態渲染成 PNG。
+
+開發時可以用的環境變數：`WHILEAI_SERVER`、`WHILEAI_DATA_DIR`、`WHILEAI_DELAY`、`WHILEAI_GAP`。
+
+## 還沒做的
+
+- **部署後端到公開網址。** 做完才能邀真正的同事。App 端只要在 `~/.whileai/config.json` 寫 `{"server": "https://…"}`。
+- 範本題、修改或撤回題目、複製結果卡到 Slack、刪除我的資料（P1）。
+- 跨群組比較、公開範本（P2）。
+- 一個人同時用網頁和 App 加入，可能會變成兩個身分。從 App 開網頁（一次性碼）就不會有這個問題。
+- 還沒在 Codex 桌面版（ChatGPT.app）驗證 hooks 會不會觸發。
