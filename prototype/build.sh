@@ -7,13 +7,16 @@ APP=build/WhileAI.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-# Command Line Tools 的預設 SDK 可能比 swiftc 新而無法編譯；有 26.5 SDK 時優先使用。
-SDK_ARGS=()
-CLT_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
-[ -z "${SDKROOT:-}" ] && [ -d "$CLT_SDK" ] && SDK_ARGS=(-sdk "$CLT_SDK")
-
-swiftc -O ${SDK_ARGS[@]+"${SDK_ARGS[@]}"} -target arm64-apple-macos13.0 \
-  -o "$APP/Contents/MacOS/WhileAI" Sources/main.swift
+# 依序嘗試：預設 SDK → Command Line Tools 裡的各版 SDK（新到舊）。
+# 有些機器的預設 SDK 比 swiftc 新而無法編譯，換舊一點的 SDK 就可以。
+compile() { swiftc -O ${@+"$@"} -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/WhileAI" Sources/main.swift; }
+if ! compile 2>/dev/null; then
+  ok=0
+  for sdk in $(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX[0-9]*.sdk 2>/dev/null | sort -r); do
+    if compile -sdk "$sdk" 2>/dev/null; then ok=1; break; fi
+  done
+  [ "$ok" = 1 ] || { echo "編譯失敗，以下是錯誤訊息："; compile; exit 1; }
+fi
 
 # 內附後端：App 連不上本機伺服器時會自己啟動它
 mkdir -p "$APP/Contents/Resources/server"
