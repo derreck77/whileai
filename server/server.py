@@ -30,7 +30,7 @@ DEFAULT_HOURS = 24
 HANDOFF_TTL = 120         # App → 網頁 的一次性登入碼有效秒數
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 MAX_BODY = 16 * 1024      # 請求內容上限（bytes）
-TRUST_PROXY = os.environ.get("TRUST_PROXY") == "1" or bool(os.environ.get("RAILWAY_ENVIRONMENT"))
+TRUST_PROXY = os.environ.get("TRUST_PROXY") == "1" or bool(os.environ.get("RAILWAY_ENVIRONMENT_NAME"))
 
 STARTER_QUESTIONS = [
     ("這週你主要用哪個 AI Coding Agent？", ["Codex", "Claude Code", "Cursor", "其他"]),
