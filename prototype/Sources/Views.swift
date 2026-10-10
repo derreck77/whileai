@@ -986,17 +986,24 @@ struct QuestionView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if q.hasResults {
-                ResultsView(q: q)
-            } else if q.closed {
-                Banner(text: q.hiddenReason ?? "結果未公開", icon: "lock.fill", tint: .secondary)
-            } else if q.answered {
-                Banner(text: "已回答 · \(q.hiddenReason ?? "開獎時會通知你")", icon: "checkmark.circle.fill", tint: .green)
-            } else {
+            if !q.closed && !q.answered {
+                // 還沒回答就一定先顯示作答區。出題者自己也要能回答：
+                // 即時題的出題者可以提前看結果，但結果放在作答區下面，不能把作答區蓋掉
                 answerUI
                 if !q.isAnonymous {
                     Text("具名題：大家會看到你的回答").font(.system(size: 10.5)).foregroundStyle(Theme.named)
                 }
+                if q.hasResults && q.answeredCount > 0 {
+                    Divider()
+                    SectionLabel(text: "目前的回答")
+                    ResultsView(q: q, compact: true)
+                }
+            } else if q.hasResults {
+                ResultsView(q: q)
+            } else if q.closed {
+                Banner(text: q.hiddenReason ?? "結果未公開", icon: "lock.fill", tint: .secondary)
+            } else {
+                Banner(text: "已回答 · \(q.hiddenReason ?? "開獎時會通知你")", icon: "checkmark.circle.fill", tint: .green)
             }
 
             footer
@@ -1153,11 +1160,12 @@ struct ScaleLabels: View {
 
 struct ResultsView: View {
     let q: Question
+    var compact = false                  // 放在作答區下方當預覽時，畫作用縮圖
     @State private var shown = false     // 長條從 0 長出來
 
     var body: some View {
         if let drawings = q.drawings {
-            DrawingGallery(drawings: drawings)
+            DrawingGallery(drawings: drawings, compact: compact)
         } else if let texts = q.texts {
             CappedList(count: texts.count, rowHeight: 46, maxHeight: 216) {
                 ForEach(texts.indices, id: \.self) { i in
@@ -1388,16 +1396,18 @@ struct DrawingPad: View {
 /// 開獎：所有人的畫
 struct DrawingGallery: View {
     let drawings: [Drawing]
+    var compact = false     // 預覽：三欄小縮圖，只有一張時也不放大
 
     var body: some View {
-        if drawings.count == 1 {
+        if drawings.count == 1 && !compact {
             cell(drawings[0])
         } else {
-            let grid = LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+            let column = GridItem(.flexible(), spacing: 8)
+            let grid = LazyVGrid(columns: Array(repeating: column, count: compact ? 3 : 2), alignment: .leading, spacing: 8) {
                 ForEach(drawings.indices, id: \.self) { i in cell(drawings[i]) }
             }
-            if drawings.count > 4 {
-                ScrollView { grid }.frame(height: 290)
+            if drawings.count > (compact ? 6 : 4) {
+                ScrollView { grid }.frame(height: compact ? 190 : 290)
             } else {
                 grid
             }

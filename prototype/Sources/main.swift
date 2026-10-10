@@ -147,6 +147,19 @@ if CommandLine.arguments.dropFirst().first == "snapshot" {
         $0.question = d; $0.phase = .done
     }
     add("33-ask-draw", .ask) { apply($0, AskTemplate.all[7]) }
+    // 出題者自己還沒回答的即時題：要看得到畫布，別人的畫放在下面
+    add("34-question-mine-draw-unanswered", .question) {
+        var d = q(22, "畫一隻貓", author: "derreck", mine: true, kind: "draw", options: [], anonymous: false, live: true, answered: 1)
+        d.myAnswered = false
+        d.drawings = [Drawing(strokes: zigzag, name: "阿凱")]
+        $0.question = d
+    }
+    add("35-question-mine-choice-unanswered", .question) {
+        var c = q(23, "下午要不要訂飲料？", author: "derreck", mine: true, options: ["要", "不要"], anonymous: false, live: true,
+                  answered: 0, results: [0, 0])
+        c.myAnswered = false; c.voters = [[], []]
+        $0.question = c
+    }
 
     MainActor.assumeIsolated {
         for (name, m) in cases {

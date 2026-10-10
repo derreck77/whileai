@@ -413,6 +413,31 @@ async function renderGroup(gid) {
   });
 }
 
+// 各題型的作答區
+function answerHtml(q, kind, scaleLabels) {
+  if (kind === 'multi') {
+    return q.options.map((o, i) => `<label class="check opt" style="padding:9px 12px;border-radius:10px">
+        <input type="checkbox" data-pick="${q.id}" value="${i}"> <span style="color:var(--text)">${esc(o)}</span></label>`).join('')
+      + `<button style="margin-top:8px" data-multi="${q.id}">送出</button>`;
+  }
+  if (kind === 'scale') {
+    return `<div class="scale">${[0, 1, 2, 3, 4].map(i => `<button class="opt" data-vote="${q.id}:${i}">${i + 1}</button>`).join('')}</div>` + scaleLabels;
+  }
+  if (kind === 'draw') {
+    return `<canvas class="pad" width="1000" height="700" data-pad="${q.id}"></canvas>
+      <div class="tools">${COLORS.map((c, i) => `<button class="dot" data-color="${i}" style="background:${c}" aria-label="顏色 ${i + 1}"></button>`).join('')}
+        <span style="flex:1"></span>
+        <button class="ghost" data-width="1">細</button><button class="ghost" data-width="2">粗</button>
+        <button class="ghost" data-undo>復原</button><button class="ghost" data-clear>清除</button></div>
+      <button data-draw="${q.id}">送出這張畫</button>`;
+  }
+  if (kind === 'text') {
+    return `<textarea id="text-${q.id}" maxlength="140" placeholder="寫下你的回答（最多 140 字）"></textarea>
+      <button style="margin-top:8px" data-text="${q.id}">送出</button>`;
+  }
+  return q.options.map((o, i) => `<button class="opt" data-vote="${q.id}:${i}">${esc(o)}</button>`).join('');
+}
+
 function questionCard(q) {
   const kind = q.kind || 'choice';
   const meta = `<div class="q-meta">${esc(q.author_name)} 出題 · ${q.answered_count}／${q.member_count} 人已答 · ${q.closed ? '已開獎' : timeLeft(q.closes_at)}</div>`;
@@ -421,7 +446,8 @@ function questionCard(q) {
     : `<p class="faint" style="margin:8px 0 0">匿名 · ≥3 人回答才公開${q.live ? ' · 回答後立刻看結果' : ''}</p>`;
   const scaleLabels = (q.scale_low || q.scale_high)
     ? `<div class="row faint" style="justify-content:space-between"><span>${q.scale_low ? '1 = ' + esc(q.scale_low) : ''}</span><span>${q.scale_high ? '5 = ' + esc(q.scale_high) : ''}</span></div>` : '';
-  let body;
+  // 結果（看得到的話）
+  let body = null;
   if (q.drawings) {
     body = `<div class="gallery ${q.drawings.length === 1 ? 'one' : ''}">` + q.drawings.map(d => {
       DV.push(d.strokes);
@@ -445,29 +471,17 @@ function questionCard(q) {
         <span class="muted">${pct}% · ${q.results[i]} 票</span></div>
         <div class="bar ${mine(i) ? 'mine' : ''}"><i style="width:${Math.min(pct, 100)}%"></i></div>${names}`;
     }).join('');
-  } else if (q.closed) {
-    body = `<p class="muted">${esc(q.hidden_reason || '結果未公開')}</p>`;
-  } else if (q.my_answered) {
-    body = `<p class="badge done">✓ 已回答 · ${esc(q.hidden_reason || '開獎時公布結果')}</p>`;
-  } else if (kind === 'multi') {
-    body = q.options.map((o, i) => `<label class="check opt" style="padding:9px 12px;border-radius:10px">
-        <input type="checkbox" data-pick="${q.id}" value="${i}"> <span style="color:var(--text)">${esc(o)}</span></label>`).join('')
-      + `<button style="margin-top:8px" data-multi="${q.id}">送出</button>` + privacy;
-  } else if (kind === 'scale') {
-    body = `<div class="scale">${[0, 1, 2, 3, 4].map(i => `<button class="opt" data-vote="${q.id}:${i}">${i + 1}</button>`).join('')}</div>`
-      + scaleLabels + privacy;
-  } else if (kind === 'draw') {
-    body = `<canvas class="pad" width="1000" height="700" data-pad="${q.id}"></canvas>
-      <div class="tools">${COLORS.map((c, i) => `<button class="dot" data-color="${i}" style="background:${c}" aria-label="顏色 ${i + 1}"></button>`).join('')}
-        <span style="flex:1"></span>
-        <button class="ghost" data-width="1">細</button><button class="ghost" data-width="2">粗</button>
-        <button class="ghost" data-undo>復原</button><button class="ghost" data-clear>清除</button></div>
-      <button data-draw="${q.id}">送出這張畫</button>` + privacy;
-  } else if (kind === 'text') {
-    body = `<textarea id="text-${q.id}" maxlength="140" placeholder="寫下你的回答（最多 140 字）"></textarea>
-      <button style="margin-top:8px" data-text="${q.id}">送出</button>` + privacy;
-  } else {
-    body = q.options.map((o, i) => `<button class="opt" data-vote="${q.id}:${i}">${esc(o)}</button>`).join('') + privacy;
+  }
+  const resultsHtml = body;
+
+  // 還沒回答就一定先顯示作答區。出題者自己也要能回答：
+  // 即時題的出題者可以提前看結果，但結果放在作答區下面，不能把作答區蓋掉
+  if (!q.closed && !q.my_answered) {
+    body = answerHtml(q, kind, scaleLabels) + privacy;
+    if (resultsHtml && q.answered_count > 0) body += `<p class="faint" style="margin:14px 0 6px">目前的回答</p>` + resultsHtml;
+  } else if (!resultsHtml) {
+    body = q.closed ? `<p class="muted">${esc(q.hidden_reason || '結果未公開')}</p>`
+                    : `<p class="badge done">✓ 已回答 · ${esc(q.hidden_reason || '開獎時公布結果')}</p>`;
   }
   return `<div class="card">${meta}<div class="q-text">${esc(q.text)}</div>${body}</div>`;
 }
