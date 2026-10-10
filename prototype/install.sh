@@ -6,7 +6,8 @@ cd "$(dirname "$0")"
 
 # 正式伺服器網址寫在 repo 根目錄的 whileai.json；空白時使用本機伺服器（只有自己能用）
 SERVER=$(/usr/bin/python3 -c "import json;print(json.load(open('../whileai.json')).get('server','').strip())" 2>/dev/null || true)
-WHILEAI_DEFAULT_SERVER="$SERVER" ./build.sh
+INSTALL_URL=$(/usr/bin/python3 -c "import json;print(json.load(open('../whileai.json')).get('install_url','').strip())" 2>/dev/null || true)
+WHILEAI_DEFAULT_SERVER="$SERVER" WHILEAI_INSTALL_URL="$INSTALL_URL" ./build.sh
 DEST="$HOME/Applications/WhileAI.app"
 mkdir -p "$HOME/Applications"
 pkill -f "WhileAI.app/Contents/MacOS/WhileAI" 2>/dev/null || true

@@ -22,7 +22,7 @@ WhileAI：等 AI Agent 的空檔，和朋友互相出題
    到「系統設定 → 隱私權與安全性」，往下找到 WhileAI，按「強制打開」。
    （或在終端機執行：xattr -dr com.apple.quarantine /Applications/WhileAI.app）
 3. 按「連接」，讓 WhileAI 連上你的 Codex／Claude Code，然後取一個暱稱。
-4. 點朋友給你的邀請連結，選「在 WhileAI App 中加入」。
+4. 點選單列的 ⏳ →「輸入邀請碼」，貼上朋友給你的邀請碼。
 
 之後在 Codex 或 Claude Code 工作超過幾秒時，右上角就會出現群組的題目。
 答案完全匿名；WhileAI 不會讀取你的程式碼或 prompt。

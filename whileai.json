@@ -1,3 +1,4 @@
 {
-  "server": "https://whileai-production.up.railway.app"
+  "server": "https://whileai-production.up.railway.app",
+  "install_url": "https://github.com/derreck77/whileai"
 }

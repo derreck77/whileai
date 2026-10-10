@@ -1,0 +1,204 @@
+// 資料模型、本機儲存、後端 API
+import Foundation
+
+let eventNote = Notification.Name("ai.whileai.agent-event")
+let dataDir = ProcessInfo.processInfo.environment["WHILEAI_DATA_DIR"].map { URL(fileURLWithPath: $0) }
+    ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".whileai")
+
+enum Agent: String {
+    case codex
+    case claudeCode = "claude-code"
+
+    var displayName: String { self == .codex ? "Codex" : "Claude Code" }
+}
+
+// MARK: - 資料模型（對應後端 API）
+
+struct Question: Codable, Equatable, Identifiable {
+    let id: Int
+    let groupId: Int
+    let groupName: String
+    let authorName: String
+    let isMine: Bool
+    let text: String
+    let options: [String]
+    let closesAt: Double
+    let closed: Bool
+    let answeredCount: Int
+    let memberCount: Int
+    let myVote: Int?
+    let results: [Int]?
+    let hiddenReason: String?
+}
+
+struct Feed: Codable {
+    let pending: [Question]
+    let results: [Question]
+}
+
+struct Group: Codable, Equatable, Identifiable {
+    let id: Int
+    let name: String
+    let inviteCode: String
+    let inviteUrl: String
+    let memberCount: Int
+    let muted: Bool
+}
+
+struct GroupDetail: Codable {
+    let group: Group
+    let questions: [Question]
+}
+
+struct UserInfo: Codable {
+    let id: Int
+    let name: String
+}
+
+struct Me: Codable {
+    let user: UserInfo
+    let groups: [Group]
+}
+
+struct Identity: Codable {
+    let token: String
+    var name: String
+    var server: String?   // 這組身分屬於哪個伺服器；舊版沒有這個欄位時視為本機伺服器
+}
+
+// MARK: - 本機儲存（身分、看過哪些開獎、每日顯示上限、互動紀錄；不含任何工作內容）
+
+struct LocalState: Codable {
+    var seenResults: [Int] = []
+    var shownByDay: [String: [Int]] = [:]
+    var onboardingShown = false
+
+    init() {}
+    init(from decoder: Decoder) throws {   // 舊版 state.json 沒有新欄位時用預設值
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        seenResults = try c.decodeIfPresent([Int].self, forKey: .seenResults) ?? []
+        shownByDay = try c.decodeIfPresent([String: [Int]].self, forKey: .shownByDay) ?? [:]
+        onboardingShown = try c.decodeIfPresent(Bool.self, forKey: .onboardingShown) ?? false
+    }
+}
+
+enum Store {
+    static func ensureDir() {
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+    }
+
+    static func load<T: Decodable>(_ name: String, as: T.Type) -> T? {
+        guard let data = try? Data(contentsOf: dataDir.appendingPathComponent(name)) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    static func save<T: Encodable>(_ value: T, to name: String) {
+        let url = dataDir.appendingPathComponent(name)
+        if let data = try? JSONEncoder().encode(value) { try? data.write(to: url, options: .atomic) }
+        // identity.json 含 token，只給自己讀寫
+        if name == "identity.json" {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+    }
+
+    static func bundleString(_ key: String) -> String? {
+        guard let s = Bundle.main.object(forInfoDictionaryKey: key) as? String, !s.isEmpty else { return nil }
+        return s
+    }
+
+    // 伺服器網址：環境變數 > config.json > 打包時寫入的預設值 > 本機
+    static var serverURL: String {
+        if let env = ProcessInfo.processInfo.environment["WHILEAI_SERVER"] { return env }
+        struct Config: Codable { let server: String }
+        if let s = load("config.json", as: Config.self)?.server { return s }
+        return bundleString("WhileAIDefaultServer") ?? "http://127.0.0.1:8787"
+    }
+
+    // 邀請訊息裡的「還沒安裝？」連結
+    static var installURL: String? { bundleString("WhileAIInstallURL") }
+
+    // 驗證 Codex（CLI／桌面 App）與 Claude Code 有沒有送出 hook 事件：只記時間與事件名稱
+    static func logHook(_ event: String) {
+        let url = dataDir.appendingPathComponent("hooks.log")
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 200_000 {
+            try? FileManager.default.removeItem(at: url)
+        }
+        append(Data("\(ISO8601DateFormatter().string(from: Date())) \(event)\n".utf8), to: url)
+    }
+
+    // H1／H2 驗證用的互動紀錄
+    static func log(_ type: String, question: Int? = nil, extra: [String: Any] = [:]) {
+        var row: [String: Any] = ["ts": ISO8601DateFormatter().string(from: Date()), "type": type]
+        if let q = question { row["question"] = q }
+        row.merge(extra) { $1 }
+        guard var line = try? JSONSerialization.data(withJSONObject: row) else { return }
+        line.append(0x0A)
+        append(line, to: dataDir.appendingPathComponent("events.jsonl"))
+    }
+
+    static func append(_ data: Data, to url: URL) {
+        if let fh = try? FileHandle(forWritingTo: url) {
+            fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+}
+
+// MARK: - API
+
+enum APIError: Error { case message(String) }
+
+final class API {
+    var token: String?
+    let base: String
+    var onUnauthorized: (() -> Void)?
+    let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.keyDecodingStrategy = .convertFromSnakeCase
+        return d
+    }()
+
+    init(base: String) { self.base = base }
+
+    func call<T: Decodable>(_ method: String, _ path: String, body: [String: Any]? = nil,
+                            as: T.Type, done: @escaping (Result<T, APIError>) -> Void) {
+        guard let url = URL(string: base + path) else { return }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.httpMethod = method
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let t = token { req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
+        if let body = body { req.httpBody = try? JSONSerialization.data(withJSONObject: body) }
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            let result: Result<T, APIError>
+            if let err = err {
+                result = .failure(.message("連不上 WhileAI 伺服器（\(err.localizedDescription)）"))
+            } else if let http = resp as? HTTPURLResponse, let data = data {
+                if http.statusCode == 200, let v = try? self.decoder.decode(T.self, from: data) {
+                    result = .success(v)
+                } else {
+                    if http.statusCode == 401, self.token != nil {
+                        DispatchQueue.main.async { self.onUnauthorized?() }
+                    }
+                    let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+                    result = .failure(.message(msg ?? "伺服器錯誤（\(http.statusCode)）"))
+                }
+            } else {
+                result = .failure(.message("伺服器沒有回應"))
+            }
+            DispatchQueue.main.async { done(result) }
+        }.resume()
+    }
+}
+
+func timeLeft(_ ts: Double) -> String {
+    let s = ts - Date().timeIntervalSince1970
+    if s <= 0 { return "已截止" }
+    if s < 3600 { return "剩 \(Int((s / 60).rounded(.up))) 分鐘" }
+    if s < 86400 { return "剩 \(Int((s / 3600).rounded())) 小時" }
+    return "剩 \(Int((s / 86400).rounded())) 天"
+}
+
+extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}

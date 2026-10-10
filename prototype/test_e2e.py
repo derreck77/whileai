@@ -63,7 +63,7 @@ def main():
             call("POST", f"/api/invites/{g['invite_code']}/join", token=u["token"])
         q = call("POST", f"/api/groups/{g['id']}/questions",
                  {"text": "下個 sprint 要不要統一改用 Codex？", "options": ["要", "不要", "先試一週"]}, kai["token"])
-        json.dump({"token": lin["token"], "name": "小林"}, open(os.path.join(data, "identity.json"), "w"))
+        json.dump({"token": lin["token"], "name": "小林", "server": BASE}, open(os.path.join(data, "identity.json"), "w"))
 
         app = subprocess.Popen([APP], env=dict(os.environ, WHILEAI_DATA_DIR=data, WHILEAI_SERVER=BASE,
                                                WHILEAI_DELAY="2", WHILEAI_GAP="0"),

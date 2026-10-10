@@ -9,7 +9,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # 依序嘗試：預設 SDK → Command Line Tools 裡的各版 SDK（新到舊）。
 # 有些機器的預設 SDK 比 swiftc 新而無法編譯，換舊一點的 SDK 就可以。
-compile() { swiftc -O ${@+"$@"} -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/WhileAI" Sources/main.swift; }
+compile() { swiftc -O ${@+"$@"} -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/WhileAI" Sources/*.swift; }
 if ! compile 2>/dev/null; then
   ok=0
   for sdk in $(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX[0-9]*.sdk 2>/dev/null | sort -r); do
@@ -36,6 +36,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>WhileAIDefaultServer</key><string>__DEFAULT_SERVER__</string>
+  <key>WhileAIInstallURL</key><string>__INSTALL_URL__</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
@@ -50,7 +51,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 # 打包給朋友時，用 WHILEAI_DEFAULT_SERVER 指定正式伺服器網址（沒指定時為空 → 使用本機伺服器）
-/usr/bin/sed -i '' "s#__DEFAULT_SERVER__#${WHILEAI_DEFAULT_SERVER:-}#" "$APP/Contents/Info.plist"
+/usr/bin/sed -i '' -e "s#__DEFAULT_SERVER__#${WHILEAI_DEFAULT_SERVER:-}#" \
+  -e "s#__INSTALL_URL__#${WHILEAI_INSTALL_URL:-}#" "$APP/Contents/Info.plist"
 
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 echo "Built $APP"
