@@ -32,10 +32,15 @@ INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 MAX_BODY = 16 * 1024      # 請求內容上限（bytes）
 TRUST_PROXY = os.environ.get("TRUST_PROXY") == "1" or bool(os.environ.get("RAILWAY_ENVIRONMENT_NAME"))
 
+KINDS = ("choice", "multi", "scale", "text")
+MAX_OPTIONS = 6
+MAX_TEXT_ANSWER = 140
+
+# 新群組的起手題：(問題, 題型, 選項, 評分兩端的說明)
 STARTER_QUESTIONS = [
-    ("這週你主要用哪個 AI Coding Agent？", ["Codex", "Claude Code", "Cursor", "其他"]),
-    ("Agent 最近一次完成的任務，結果直接可用嗎？", ["直接可用", "小改就能用", "要大改", "重來比較快"]),
-    ("你會讓 Agent 直接 push 到 main 嗎？", ["絕對不會", "小專案會", "每天都在做"]),
+    ("這週你主要用哪個 AI Coding Agent？", "choice", ["Codex", "Claude Code", "Cursor", "其他"], None),
+    ("這週工作順不順？", "scale", None, {"low": "很卡", "high": "很順"}),
+    ("Agent 最近做過最蠢的一件事是什麼？", "text", None, None),
 ]
 
 SCHEMA = """
@@ -120,7 +125,22 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+        self.migrate()
         self.lock = threading.Lock()
+
+    def migrate(self):
+        """舊資料庫補上新欄位（題型、匿名／具名、即時結果、各題型的回答內容）。"""
+        wanted = {
+            "questions": [("kind", "TEXT NOT NULL DEFAULT 'choice'"), ("anonymous", "INTEGER NOT NULL DEFAULT 1"),
+                          ("live", "INTEGER NOT NULL DEFAULT 0"), ("config", "TEXT")],
+            "votes": [("answer", "TEXT")],   # JSON：單選／評分是索引、多選是索引陣列、文字題是字串
+        }
+        for table, cols in wanted.items():
+            have = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            for name, ddl in cols:
+                if name not in have:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+        self.db.commit()
 
     # ---------- 使用者 ----------
 
@@ -179,11 +199,8 @@ class Store:
                               (name, self.new_invite_code(), user["id"], t))
         gid = cur.lastrowid
         self.db.execute("INSERT INTO members (group_id, user_id, joined_at) VALUES (?, ?, ?)", (gid, user["id"], t))
-        for text, options in STARTER_QUESTIONS:
-            self.db.execute(
-                "INSERT INTO questions (group_id, author_id, text, options, created_at, closes_at) "
-                "VALUES (?, NULL, ?, ?, ?, ?)",
-                (gid, text, json.dumps(options, ensure_ascii=False), t, t + 48 * 3600))
+        for text, kind, options, config in STARTER_QUESTIONS:
+            self.insert_question(gid, None, text, kind, options, config, True, False, t, 48)
         return gid
 
     def group_row(self, gid):
@@ -242,25 +259,41 @@ class Store:
 
     # ---------- 題目 ----------
 
-    def create_question(self, user, gid, text, options, hours):
+    def insert_question(self, gid, author_id, text, kind, options, config, anonymous, live, t, hours):
+        if kind == "scale":
+            options = ["1", "2", "3", "4", "5"]
+        elif kind == "text":
+            options = []
+        cur = self.db.execute(
+            "INSERT INTO questions (group_id, author_id, text, options, created_at, closes_at, kind, anonymous, live, config) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (gid, author_id, text, json.dumps(options, ensure_ascii=False), t, t + int(hours * 3600), kind,
+             1 if anonymous else 0, 1 if live else 0, json.dumps(config, ensure_ascii=False) if config else None))
+        return cur.lastrowid
+
+    def create_question(self, user, gid, text, options, hours, kind="choice", anonymous=True, live=False, config=None):
         self.require_member(gid, user)
-        text = clean_text(text, "問題", 5, 120)
-        if not isinstance(options, list) or not 2 <= len(options) <= 4:
-            raise ApiError(400, "選項需要 2–4 個")
-        options = [clean_text(o, "選項", 1, 40) for o in options]
-        if len(set(options)) != len(options):
-            raise ApiError(400, "選項不能重複")
+        text = clean_text(text, "問題", 2, 120)
+        if kind not in KINDS:
+            raise ApiError(400, "不支援的題型")
+        if kind in ("choice", "multi"):
+            if not isinstance(options, list) or not 2 <= len(options) <= MAX_OPTIONS:
+                raise ApiError(400, f"選項需要 2–{MAX_OPTIONS} 個")
+            options = [clean_text(o, "選項", 1, 40) for o in options]
+            if len(set(options)) != len(options):
+                raise ApiError(400, "選項不能重複")
+        clean_config = None
+        if kind == "scale" and isinstance(config, dict):
+            clean_config = {k: clean_text(config[k], "評分說明", 1, 12)
+                            for k in ("low", "high") if isinstance(config.get(k), str) and config[k].strip()}
         try:
             hours = float(hours if hours is not None else DEFAULT_HOURS)
         except (TypeError, ValueError):
             raise ApiError(400, "截止時間格式錯誤")
-        if not 1 <= hours <= 168:
-            raise ApiError(400, "截止時間需介於 1 小時到 7 天")
-        t = now()
-        cur = self.db.execute(
-            "INSERT INTO questions (group_id, author_id, text, options, created_at, closes_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (gid, user["id"], text, json.dumps(options, ensure_ascii=False), t, t + int(hours * 3600)))
-        return cur.lastrowid
+        if not 0.25 <= hours <= 168:
+            raise ApiError(400, "截止時間需介於 15 分鐘到 7 天")
+        return self.insert_question(gid, user["id"], text, kind, options, clean_config or None,
+                                    bool(anonymous), bool(live), now(), hours)
 
     def question_row(self, qid):
         row = self.db.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()
@@ -271,16 +304,28 @@ class Store:
     def answered_count(self, qid):
         return self.db.execute("SELECT COUNT(*) FROM votes WHERE question_id = ?", (qid,)).fetchone()[0]
 
-    def vote(self, user, qid, option):
+    def vote(self, user, qid, answer):
         q = self.question_row(qid)
         self.require_member(q["group_id"], user)
         if self.is_closed(q):
             raise ApiError(409, "這題已經截止")
         options = json.loads(q["options"])
-        if not isinstance(option, int) or not 0 <= option < len(options):
-            raise ApiError(400, "選項不存在")
+        kind = q["kind"]
+        if kind in ("choice", "scale"):
+            if not isinstance(answer, int) or isinstance(answer, bool) or not 0 <= answer < len(options):
+                raise ApiError(400, "選項不存在")
+        elif kind == "multi":
+            if (not isinstance(answer, list) or not answer or len(set(answer)) != len(answer)
+                    or any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(options) for i in answer)):
+                raise ApiError(400, "請至少選一個選項")
+            answer = sorted(answer)
+        else:
+            answer = clean_text(answer, "回答", 1, MAX_TEXT_ANSWER)
         try:
-            self.db.execute("INSERT INTO votes VALUES (?, ?, ?, ?)", (qid, user["id"], option, now()))
+            self.db.execute(
+                "INSERT INTO votes (question_id, user_id, option_index, created_at, answer) VALUES (?, ?, ?, ?, ?)",
+                (qid, user["id"], answer if isinstance(answer, int) else 0, now(),
+                 json.dumps(answer, ensure_ascii=False)))
         except sqlite3.IntegrityError:
             raise ApiError(409, "你已經回答過這題")
         # 全員答完 → 提早開獎。群組不到 MIN_REVEAL 人時不提早，避免剛建群就把題目關掉
@@ -292,41 +337,80 @@ class Store:
     def is_closed(q):
         return q["closed_at"] is not None or now() >= q["closes_at"]
 
+    @staticmethod
+    def decode_answer(row):
+        return json.loads(row["answer"]) if row["answer"] is not None else row["option_index"]
+
     def question_view(self, q, user, group_name=None):
         qid = q["id"]
+        kind = q["kind"]
+        anonymous = bool(q["anonymous"])
+        live = bool(q["live"])
         options = json.loads(q["options"])
+        config = json.loads(q["config"]) if q["config"] else {}
         answered = self.answered_count(qid)
         closed = self.is_closed(q)
-        mine = self.db.execute("SELECT option_index FROM votes WHERE question_id = ? AND user_id = ?",
+        mine = self.db.execute("SELECT answer, option_index FROM votes WHERE question_id = ? AND user_id = ?",
                                (qid, user["id"])).fetchone()
+        my_answer = self.decode_answer(mine) if mine else None
         author = self.user_by_id(q["author_id"]) if q["author_id"] else None
+        is_mine = q["author_id"] == user["id"]
         view = {
             "id": qid,
             "group_id": q["group_id"],
             "group_name": group_name or self.group_row(q["group_id"])["name"],
             "author_name": author["name"] if author else "WhileAI 起手題",
-            "is_mine": q["author_id"] == user["id"],
+            "is_mine": is_mine,
             "text": q["text"],
+            "kind": kind,
+            "anonymous": anonymous,
+            "live": live,
             "options": options,
+            "scale_low": config.get("low"),
+            "scale_high": config.get("high"),
             "created_at": q["created_at"],
             "closes_at": q["closes_at"],
             "closed": closed,
             "closed_at": (q["closed_at"] or q["closes_at"]) if closed else None,
             "answered_count": answered,
             "member_count": self.member_count(q["group_id"]),
-            "my_vote": mine["option_index"] if mine else None,
-            "results": None,
+            "my_answered": mine is not None,
+            "my_vote": my_answer if kind in ("choice", "scale") and mine else None,
+            "my_votes": my_answer if kind == "multi" and mine else None,
+            "my_text": my_answer if kind == "text" and mine else None,
+            "results": None,      # 各選項票數（單選／多選／評分）
+            "voters": None,       # 具名題：各選項的回答者暱稱
+            "texts": None,        # 文字題：回答列表
             "hidden_reason": None,
         }
-        if closed:
-            if answered >= MIN_REVEAL:
-                counts = [0] * len(options)
-                for r in self.db.execute("SELECT option_index, COUNT(*) c FROM votes WHERE question_id = ? "
-                                         "GROUP BY option_index", (qid,)):
-                    counts[r["option_index"]] = r["c"]
-                view["results"] = counts
-            else:
-                view["hidden_reason"] = f"回答人數不足 {MIN_REVEAL} 人，未公開結果"
+        # 什麼時候看得到結果：截止後；或「即時」題在自己回答之後（出題者隨時可看）
+        if not (closed or (live and (mine is not None or is_mine))):
+            return view
+        # 匿名題：不足 MIN_REVEAL 人時不公開，避免從結果推回個人
+        if anonymous and answered < MIN_REVEAL:
+            view["hidden_reason"] = (f"回答人數不足 {MIN_REVEAL} 人，未公開結果" if closed
+                                     else f"已有 {answered} 人回答，滿 {MIN_REVEAL} 人後顯示結果")
+            return view
+        rows = self.db.execute(
+            "SELECT v.answer, v.option_index, u.name FROM votes v JOIN users u ON u.id = v.user_id "
+            "WHERE v.question_id = ? ORDER BY v.created_at, v.user_id", (qid,)).fetchall()
+        if kind == "text":
+            texts = [{"text": self.decode_answer(r), "name": None if anonymous else r["name"]} for r in rows]
+            if anonymous:   # 不依回答時間排序，避免從順序猜出是誰
+                texts.sort(key=lambda t: hashlib.sha256(f"{qid}:{t['text']}".encode()).hexdigest())
+            view["texts"] = texts
+            return view
+        counts = [0] * len(options)
+        voters = [[] for _ in options]
+        for r in rows:
+            a = self.decode_answer(r)
+            for i in (a if isinstance(a, list) else [a]):
+                if isinstance(i, int) and 0 <= i < len(options):
+                    counts[i] += 1
+                    voters[i].append(r["name"])
+        view["results"] = counts
+        if not anonymous:
+            view["voters"] = voters
         return view
 
     def group_detail(self, user, gid, base_url):
@@ -351,9 +435,9 @@ class Store:
         for q in rows:
             v = self.question_view(q, user, q["group_name"])
             if not v["closed"]:
-                if v["my_vote"] is None and not q["muted"]:
+                if not v["my_answered"] and not q["muted"]:
                     pending.append(v)
-            elif v["closed_at"] >= now() - 7 * 86400 and (v["my_vote"] is not None or v["is_mine"]):
+            elif v["closed_at"] >= now() - 7 * 86400 and (v["my_answered"] or v["is_mine"]):
                 results.append(v)
         return {"pending": pending, "results": results}
 
@@ -447,7 +531,9 @@ def api_mute(h, user, body, gid):
 
 @route("POST", r"/api/groups/(\d+)/questions", limit=("ask", 60, 3600))
 def api_ask(h, user, body, gid):
-    qid = h.store.create_question(user, int(gid), body.get("text"), body.get("options"), body.get("hours"))
+    qid = h.store.create_question(user, int(gid), body.get("text"), body.get("options"), body.get("hours"),
+                                  kind=body.get("kind") or "choice", anonymous=body.get("anonymous", True),
+                                  live=body.get("live", False), config=body.get("config"))
     return h.store.question_view(h.store.question_row(qid), user)
 
 
@@ -465,7 +551,8 @@ def api_join(h, user, body, code):
 
 @route("POST", r"/api/questions/(\d+)/vote", limit=("vote", 600, 3600))
 def api_vote(h, user, body, qid):
-    h.store.vote(user, int(qid), body.get("option"))
+    # "option" 是舊版 App 送的欄位名稱
+    h.store.vote(user, int(qid), body.get("answer", body.get("option")))
     return h.store.question_view(h.store.question_row(int(qid)), user)
 
 

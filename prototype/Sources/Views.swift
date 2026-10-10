@@ -24,7 +24,8 @@ protocol PanelActions: AnyObject {
     func back()
     func closePanel()
     func skipCard()
-    func vote(_ option: Int)
+    func vote(_ answer: Any)          // 單選／評分：Int；多選：[Int]；文字：String
+    func applyTemplate(_ t: AskTemplate)
     func openQuestion(_ q: Question)
     func submitNickname()
     func saveNickname()
@@ -66,9 +67,19 @@ final class Model: ObservableObject {
     @Published var nickname = ""
     @Published var groupName = ""
     @Published var joinCode = ""
+    @Published var askTemplate = "custom"
+    @Published var askKind = "choice"
     @Published var askText = ""
     @Published var askOptions = ["", ""]
-    @Published var askHours = 24
+    @Published var askAnonymous = true
+    @Published var askLive = false
+    @Published var askHours: Double = 24
+    @Published var askLow = ""
+    @Published var askHigh = ""
+
+    // 回答多選題、文字題時的暫存
+    @Published var multiSelection = Set<Int>()
+    @Published var answerText = ""
 
     var title: String {
         switch screen {
@@ -400,7 +411,7 @@ struct GroupView: View {
                 } else {
                     CappedList(count: d.questions.count, rowHeight: 52, maxHeight: 230) {
                         ForEach(d.questions) { q in
-                            Row(title: q.text, subtitle: status(q), accent: !q.closed && q.myVote == nil) {
+                            Row(title: q.text, subtitle: status(q), accent: !q.closed && !q.answered) {
                                 m.actions?.openQuestion(q)
                             }
                         }
@@ -414,7 +425,7 @@ struct GroupView: View {
 
     func status(_ q: Question) -> String {
         if q.closed { return q.results != nil ? "已開獎 · \(q.answeredCount) 人回答" : "已截止 · 回答不足 3 人" }
-        if q.myVote == nil { return "待你回答 · \(q.authorName) · \(timeLeft(q.closesAt))" }
+        if !q.answered { return "待你回答 · \(q.authorName) · \(timeLeft(q.closesAt))" }
         return "已回答 · \(q.answeredCount)／\(q.memberCount) · \(timeLeft(q.closesAt))"
     }
 }
@@ -459,44 +470,94 @@ struct AskView: View {
     @ObservedObject var m: Model
     let groupId: Int
 
+    var hasOptions: Bool { m.askKind == "choice" || m.askKind == "multi" }
+
     var valid: Bool {
+        guard m.askText.trimmingCharacters(in: .whitespaces).count >= 2 else { return false }
+        guard hasOptions else { return true }
         let opts = m.askOptions.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        return m.askText.trimmingCharacters(in: .whitespaces).count >= 5 && opts.count >= 2 && Set(opts).count == opts.count
+        return opts.count >= 2 && Set(opts).count == opts.count
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // 情境範本：點一下帶入設定，內容都可以再改
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 6)], alignment: .leading, spacing: 6) {
+                ForEach(AskTemplate.all) { t in
+                    Button(action: { m.actions?.applyTemplate(t) }) {
+                        Text(t.label)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .frame(maxWidth: .infinity)
+                            .background(RoundedRectangle(cornerRadius: 7)
+                                .fill(m.askTemplate == t.id ? Color.accentColor.opacity(0.22) : Color.primary.opacity(0.06)))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Picker("題型", selection: $m.askKind) {
+                Text("單選").tag("choice")
+                Text("多選").tag("multi")
+                Text("評分").tag("scale")
+                Text("文字").tag("text")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
             TextField("想問大家什麼？", text: $m.askText, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
-                .lineLimit(2...4)
-            ForEach(m.askOptions.indices, id: \.self) { i in
-                HStack(spacing: 6) {
-                    TextField("選項 \(i + 1)", text: option(i))
-                        .textFieldStyle(.roundedBorder)
-                    if m.askOptions.count > 2 {
-                        IconButton(symbol: "minus.circle", help: "刪除選項") {
-                            if m.askOptions.indices.contains(i) { m.askOptions.remove(at: i) }
+                .lineLimit(1...3)
+
+            if hasOptions {
+                ForEach(m.askOptions.indices, id: \.self) { i in
+                    HStack(spacing: 6) {
+                        TextField("選項 \(i + 1)", text: option(i))
+                            .textFieldStyle(.roundedBorder)
+                        if m.askOptions.count > 2 {
+                            IconButton(symbol: "minus.circle", help: "刪除選項") {
+                                if m.askOptions.indices.contains(i) { m.askOptions.remove(at: i) }
+                            }
                         }
                     }
                 }
+                if m.askOptions.count < 6 {
+                    Button("＋ 新增選項") { m.askOptions.append("") }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                }
+            } else if m.askKind == "scale" {
+                HStack(spacing: 6) {
+                    TextField("1 分代表…", text: $m.askLow).textFieldStyle(.roundedBorder)
+                    TextField("5 分代表…", text: $m.askHigh).textFieldStyle(.roundedBorder)
+                }
+            } else {
+                Hint(text: "成員用一句話回答（最多 140 字）。")
             }
-            if m.askOptions.count < 4 {
-                Button("＋ 新增選項") { m.askOptions.append("") }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundStyle(Color.accentColor)
+
+            Toggle(isOn: $m.askAnonymous) {
+                Text(m.askAnonymous ? "匿名（滿 3 人回答才顯示結果）" : "具名（大家會看到誰回答了什麼）").font(.caption)
             }
+            Toggle(isOn: $m.askLive) {
+                Text(m.askLive ? "回答後立刻看到結果" : "截止或全員答完才開獎").font(.caption)
+            }
+
             Picker("截止", selection: $m.askHours) {
-                Text("4 小時").tag(4)
-                Text("1 天").tag(24)
-                Text("2 天").tag(48)
-                Text("3 天").tag(72)
+                Text("30 分").tag(0.5)
+                Text("1 時").tag(1.0)
+                Text("4 時").tag(4.0)
+                Text("1 天").tag(24.0)
+                Text("3 天").tag(72.0)
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
+
             Button("發問") { m.actions?.askQuestion(groupId: groupId) }
                 .buttonStyle(.borderedProminent)
                 .disabled(!valid || m.busy)
-            Hint(text: "題目會在成員等 Agent 時出現；截止或全員答完就開獎。")
         }
     }
 
@@ -513,6 +574,8 @@ struct QuestionView: View {
     @ObservedObject var m: Model
     let q: Question
 
+    var progress: String { "\(q.answeredCount)／\(q.memberCount) 人已答 · \(timeLeft(q.closesAt))" }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(q.closed ? "🎉 開獎 · \(q.groupName)" : "\(q.groupName) · \(q.authorName) 出題")
@@ -522,63 +585,161 @@ struct QuestionView: View {
                 .font(.headline)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if q.closed {
-                result
-            } else if let mine = q.myVote {
-                Text("✓ 你選了「\(q.options[safe: mine] ?? "")」· 開獎時通知你")
-                    .font(.callout)
-                    .foregroundStyle(.green)
-                Text("\(q.answeredCount)／\(q.memberCount) 人已答 · \(timeLeft(q.closesAt))")
+            if q.hasResults {
+                results
+                Text(q.closed ? "\(q.answeredCount)／\(q.memberCount) 人回答 · \(q.isAnonymous ? "匿名" : "具名")"
+                              : "進行中 · \(progress)")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+            } else if q.closed {
+                Text(q.hiddenReason ?? "結果未公開")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else if q.answered {
+                Text("✓ 已回答 · \(q.hiddenReason ?? "開獎時通知你")")
+                    .font(.callout)
+                    .foregroundStyle(.green)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(progress).font(.caption2).foregroundStyle(.tertiary)
             } else {
-                VStack(spacing: 6) {
-                    ForEach(q.options.indices, id: \.self) { i in
-                        Button(action: { m.actions?.vote(i) }) {
-                            Text(q.options[i]).frame(maxWidth: .infinity, alignment: .leading)
+                answerUI
+                Text("\(q.isAnonymous ? "匿名 · ≥3 人回答才公開" : "具名 · 大家會看到你的回答")\(q.isLive ? " · 回答後立刻看結果" : "")")
+                    .font(.caption2)
+                    .foregroundStyle(q.isAnonymous ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.orange))
+                Text(progress).font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    // MARK: 回答
+
+    @ViewBuilder var answerUI: some View {
+        switch q.qKind {
+        case "multi":
+            VStack(spacing: 6) {
+                ForEach(q.options.indices, id: \.self) { i in
+                    let on = m.multiSelection.contains(i)
+                    Button(action: { if on { m.multiSelection.remove(i) } else { m.multiSelection.insert(i) } }) {
+                        HStack {
+                            Image(systemName: on ? "checkmark.square.fill" : "square")
+                                .foregroundStyle(on ? Color.accentColor : Color.secondary)
+                            Text(q.options[i])
+                            Spacer()
                         }
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(on ? 0.1 : 0.05)))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button("送出（已選 \(m.multiSelection.count) 個）") { m.actions?.vote(Array(m.multiSelection).sorted()) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(m.multiSelection.isEmpty || m.busy)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case "scale":
+            VStack(spacing: 4) {
+                HStack(spacing: 6) {
+                    ForEach(0..<5, id: \.self) { i in
+                        Button(action: { m.actions?.vote(i) }) {
+                            Text("\(i + 1)").font(.title3.weight(.semibold)).frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.large)
                         .disabled(m.busy)
                     }
-                    Text("匿名 · ≥3 人回答才公開 · \(q.answeredCount)／\(q.memberCount) 人已答 · \(timeLeft(q.closesAt))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                scaleLabels
+            }
+        case "text":
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("寫下你的回答（最多 140 字）", text: $m.answerText, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(2...4)
+                Button("送出") { m.actions?.vote(m.answerText.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(m.answerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              || m.answerText.count > 140 || m.busy)
+            }
+        default:
+            VStack(spacing: 6) {
+                ForEach(q.options.indices, id: \.self) { i in
+                    Button(action: { m.actions?.vote(i) }) {
+                        Text(q.options[i]).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .disabled(m.busy)
                 }
             }
         }
     }
 
-    @ViewBuilder var result: some View {
-        if let counts = q.results {
-            let total = max(counts.reduce(0, +), 1)
+    @ViewBuilder var scaleLabels: some View {
+        if q.scaleLow != nil || q.scaleHigh != nil {
+            HStack {
+                Text(q.scaleLow.map { "1 = \($0)" } ?? "")
+                Spacer()
+                Text(q.scaleHigh.map { "5 = \($0)" } ?? "")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: 結果
+
+    @ViewBuilder var results: some View {
+        if let texts = q.texts {
+            CappedList(count: texts.count, rowHeight: 44, maxHeight: 220) {
+                ForEach(texts.indices, id: \.self) { i in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(texts[i].text)
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let name = texts[i].name {
+                            Text(name).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+                }
+            }
+        } else if let counts = q.results {
+            // 多選題的百分比以「回答人數」為分母；其他題型以總票數為分母
+            let total = max(q.qKind == "multi" ? q.answeredCount : counts.reduce(0, +), 1)
             VStack(alignment: .leading, spacing: 6) {
+                if q.qKind == "scale" {
+                    let sum = counts.enumerated().reduce(0) { $0 + ($1.offset + 1) * $1.element }
+                    Text("平均 \(String(format: "%.1f", Double(sum) / Double(max(counts.reduce(0, +), 1)))) 分")
+                        .font(.title3.weight(.semibold))
+                    scaleLabels
+                }
                 ForEach(q.options.indices, id: \.self) { i in
-                    let pct = Double(counts[safe: i] ?? 0) / Double(total)
+                    let n = counts[safe: i] ?? 0
+                    let pct = Double(n) / Double(total)
+                    let mine = q.isMyChoice(i)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
-                            Text(q.options[i] + (i == q.myVote ? "（你）" : "")).font(.caption)
+                            Text((q.qKind == "scale" ? "\(i + 1) 分" : q.options[i]) + (mine ? "（你）" : "")).font(.caption)
                             Spacer()
-                            Text("\(Int((pct * 100).rounded()))% · \(counts[safe: i] ?? 0) 票")
-                                .font(.caption.monospacedDigit())
+                            Text("\(Int((pct * 100).rounded()))% · \(n) 票").font(.caption.monospacedDigit())
                         }
                         GeometryReader { g in
                             ZStack(alignment: .leading) {
                                 Capsule().fill(Color.primary.opacity(0.08))
-                                Capsule().fill(i == q.myVote ? Color.accentColor : Color.secondary.opacity(0.5))
-                                    .frame(width: g.size.width * pct)
+                                Capsule().fill(mine ? Color.accentColor : Color.secondary.opacity(0.5))
+                                    .frame(width: g.size.width * min(pct, 1))
                             }
                         }
                         .frame(height: 5)
+                        if let names = q.voters?[safe: i], !names.isEmpty {
+                            Text(names.joined(separator: "、"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
-                Text("\(q.answeredCount)／\(q.memberCount) 人回答 · 匿名")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
-        } else {
-            Text(q.hiddenReason ?? "結果未公開")
-                .font(.callout)
-                .foregroundStyle(.secondary)
         }
     }
 }

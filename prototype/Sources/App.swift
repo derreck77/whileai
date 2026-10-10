@@ -183,9 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         case .settings: model.nickname = identity?.name ?? ""
         case .home: refresh()
         case .ask:
-            model.askText = ""
-            model.askOptions = ["", ""]
-            model.askHours = 24
+            applyTemplate(AskTemplate.all[0])
         default: break
         }
     }
@@ -448,12 +446,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         }
     }
 
+    func applyTemplate(_ t: AskTemplate) {
+        model.askTemplate = t.id
+        model.askKind = t.kind
+        model.askText = t.text
+        model.askOptions = t.options.isEmpty ? ["", ""] : t.options
+        model.askAnonymous = t.anonymous
+        model.askLive = t.live
+        model.askHours = t.hours
+        model.askLow = t.low
+        model.askHigh = t.high
+        model.error = nil
+    }
+
     func askQuestion(groupId: Int) {
         guard !model.busy else { return }
-        let options = model.askOptions.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        var body: [String: Any] = ["text": model.askText, "kind": model.askKind, "anonymous": model.askAnonymous,
+                                   "live": model.askLive, "hours": model.askHours]
+        if model.askKind == "choice" || model.askKind == "multi" {
+            body["options"] = model.askOptions.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        if model.askKind == "scale" {
+            body["config"] = ["low": model.askLow.trimmingCharacters(in: .whitespaces),
+                              "high": model.askHigh.trimmingCharacters(in: .whitespaces)]
+        }
         model.busy = true
-        api.call("POST", "/api/groups/\(groupId)/questions",
-                 body: ["text": model.askText, "options": options, "hours": model.askHours],
+        Store.log("ask_submitted", extra: ["kind": model.askKind, "template": model.askTemplate,
+                                           "anonymous": model.askAnonymous, "live": model.askLive])
+        api.call("POST", "/api/groups/\(groupId)/questions", body: body,
                  as: Question.self) { [weak self] r in
             guard let self = self else { return }
             self.model.busy = false
@@ -470,6 +490,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     // MARK: - 題目
 
     func openQuestion(_ q: Question) {
+        model.multiSelection = []
+        model.answerText = ""
         model.question = q
         markSeenIfClosed(q)
         go(.question)
@@ -482,11 +504,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         model.unseenResults.removeAll { $0.id == q.id }
     }
 
-    func vote(_ i: Int) {
+    func vote(_ answer: Any) {
         guard let q = model.question, !model.busy else { return }
         model.busy = true
         model.error = nil
-        api.call("POST", "/api/questions/\(q.id)/vote", body: ["option": i], as: Question.self) { [weak self] r in
+        api.call("POST", "/api/questions/\(q.id)/vote", body: ["answer": answer], as: Question.self) { [weak self] r in
             guard let self = self else { return }
             self.model.busy = false
             switch r {
@@ -497,7 +519,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
                                        results: self.model.feed.results)
                 self.updateBadge()
                 self.loadGroup(q.groupId)
-                Store.log("voted", question: q.id, extra: ["option": i, "auto": self.isAutoCard])
+                // 只記錄題型與是否來自自動卡片，不記錄回答內容
+                Store.log("voted", question: q.id, extra: ["kind": q.qKind, "auto": self.isAutoCard])
                 if self.isAutoCard && self.model.phase == .done { self.scheduleHide(after: 5) }
             case .failure(.message(let m)):
                 self.model.error = m
@@ -574,7 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     func agentFinished() {
         model.phase = .done
         Store.log("agent_done_while_shown", question: model.question?.id)
-        let reading = model.question?.closed == true || model.question?.myVote != nil
+        let reading = model.question?.closed == true || model.question?.answered == true
         scheduleHide(after: reading ? 5 : 2.5)
     }
 
@@ -625,6 +648,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     func showAutoQuestion(_ q: Question) {
         pendingHide?.cancel()
         model.onboarding = false
+        model.multiSelection = []
+        model.answerText = ""
         model.question = q
         model.phase = .working
         lastShown = Date()

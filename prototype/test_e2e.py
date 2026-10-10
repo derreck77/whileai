@@ -75,7 +75,7 @@ def main():
         check(not events(data), "沒有任何卡片")
 
         print("2. 長任務：顯示待答題 → Codex 完成 → 收起")
-        hook("UserPromptSubmit"); time.sleep(4)
+        hook("UserPromptSubmit"); time.sleep(5.5)
         ev = events(data)
         check(ev and ev[-1]["type"] == "shown", f"顯示了待答題（題目 #{ev[-1].get('question') if ev else '-'}）")
         hook("Stop"); time.sleep(3.5)
@@ -85,7 +85,7 @@ def main():
         for u in (kai, mei, lin):
             r = call("POST", f"/api/questions/{q['id']}/vote", {"option": 2}, u["token"])
         check(r["closed"] and r["results"] == [0, 0, 3], "全員答完提早開獎")
-        hook("UserPromptSubmit"); time.sleep(4)
+        hook("UserPromptSubmit"); time.sleep(5.5)
         last = events(data)[-1]
         check(last["type"] == "result_shown" and last["question"] == q["id"], "開獎卡片優先於待答題")
         state = json.load(open(os.path.join(data, "state.json")))
@@ -97,7 +97,7 @@ def main():
         hook("Stop"); time.sleep(0.5)
 
         print("5. 同一個開獎不會再出現")
-        hook("UserPromptSubmit"); time.sleep(4)
+        hook("UserPromptSubmit"); time.sleep(5.5)
         last = events(data)[-1]
         check(last["type"] == "shown" and last.get("question") != q["id"], "這次顯示的是待答題，不是舊開獎")
         hook("Stop"); time.sleep(3)

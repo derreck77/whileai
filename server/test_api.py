@@ -70,7 +70,9 @@ def main():
 
         _, solo = call("POST", "/api/users", {"name": "獨行俠"})
         _, sg = call("POST", "/api/groups", {"name": "一人群組"}, solo["token"])
-        _, sv = call("POST", f"/api/questions/{sg['questions'][0]['id']}/vote", {"option": 0}, solo["token"])
+        starter = next(x for x in sg["questions"] if x["kind"] == "choice")
+        check({x["kind"] for x in sg["questions"]} == {"choice", "scale", "text"}, "起手題包含單選、評分、文字三種題型")
+        _, sv = call("POST", f"/api/questions/{starter['id']}/vote", {"option": 0}, solo["token"])
         check(not sv["closed"], "群組只有 1 人時，回答起手題不會提早開獎")
 
         print("B. 出題")
@@ -104,7 +106,7 @@ def main():
         check(qv["answered_count"] == 1 and qv["results"] is None, "未截止前只看得到進度 1/3，看不到結果")
         call("POST", f"/api/questions/{qid}/vote", {"option": 2}, C)
         s, last = call("POST", f"/api/questions/{qid}/vote", {"option": 0}, A)
-        check(last["closed"] and last["results"] == [1, 0, 2], "全員答完提早開獎：[1, 0, 2]")
+        check(last["closed"] and last["results"] == [1, 0, 2] and last["voters"] is None, "全員答完提早開獎：[1, 0, 2]")
         raw = json.dumps(call("GET", f"/api/groups/{gid}", token=A)[1], ensure_ascii=False)
         check("阿凱" not in raw and "美玲" not in raw, "群組 API 回應裡不會出現回答者的名字")
         _, feed = call("GET", "/api/feed", token=B)
@@ -130,6 +132,52 @@ def main():
         check(s == 200 and red["user"]["name"] == "小林" and red["token"] != A, "一次性碼換到同一位使用者的新 token")
         check(call("POST", "/api/handoff/redeem", {"code": h["code"]})[0] == 400, "一次性碼不能重複使用")
         check(call("GET", "/api/me", token=A)[0] == 200, "App 原本的 token 仍然有效")
+
+        print("G. 題型、具名、即時結果")
+        def ask(body, token=A):
+            return call("POST", f"/api/groups/{gid}/questions", body, token)[1]
+
+        # 午餐：單選、具名、即時、30 分鐘
+        lunch = ask({"text": "中午吃什麼？", "kind": "choice", "options": ["便當", "麵", "不吃"],
+                     "anonymous": False, "live": True, "hours": 0.5})
+        check(lunch["kind"] == "choice" and lunch["anonymous"] is False and lunch["live"] is True,
+              "可以出具名＋即時的題目，截止 30 分鐘")
+        _, v = call("POST", f"/api/questions/{lunch['id']}/vote", {"answer": 0}, B)
+        check(v["closed"] is False and v["results"] == [1, 0, 0] and v["voters"][0] == ["阿凱"],
+              "具名即時題：回答後立刻看到結果與是誰選的（不受 3 人門檻限制）")
+        _, g2 = call("GET", f"/api/groups/{gid}", token=C)
+        lv = next(x for x in g2["questions"] if x["id"] == lunch["id"])
+        check(lv["results"] is None and lv["voters"] is None, "還沒回答的人看不到即時結果")
+
+        # 喬時間：多選
+        slot = ask({"text": "幾點開會方便？", "kind": "multi", "options": ["10:00", "14:00", "16:00"],
+                    "anonymous": False, "live": True})
+        check(call("POST", f"/api/questions/{slot['id']}/vote", {"answer": []}, B)[0] == 400, "多選題不能一個都不選")
+        check(call("POST", f"/api/questions/{slot['id']}/vote", {"answer": [0, 0]}, B)[0] == 400, "多選題不能重複選同一項")
+        call("POST", f"/api/questions/{slot['id']}/vote", {"answer": [0, 2]}, B)
+        _, v = call("POST", f"/api/questions/{slot['id']}/vote", {"answer": [2]}, C)
+        check(v["results"] == [1, 0, 2] and v["my_votes"] == [2] and v["voters"][2] == ["阿凱", "美玲"], "多選題計票正確")
+
+        # 心情：評分、匿名、即時 → 未滿 3 人不顯示
+        mood = ask({"text": "這個 sprint 壓力多大？", "kind": "scale", "config": {"low": "很輕鬆", "high": "快爆了"}, "live": True})
+        check(mood["options"] == ["1", "2", "3", "4", "5"] and mood["scale_high"] == "快爆了", "評分題固定 1–5 分，可自訂兩端說明")
+        _, v = call("POST", f"/api/questions/{mood['id']}/vote", {"answer": 4}, B)
+        check(v["results"] is None and "滿 3 人" in v["hidden_reason"], f"匿名即時題未滿 3 人不顯示：{v['hidden_reason']}")
+        check(call("POST", f"/api/questions/{mood['id']}/vote", {"answer": 5}, C)[0] == 400, "評分超出範圍會被拒絕")
+        call("POST", f"/api/questions/{mood['id']}/vote", {"answer": 2}, C)
+        _, v = call("POST", f"/api/questions/{mood['id']}/vote", {"answer": 4}, A)
+        check(v["results"] == [0, 0, 1, 0, 2] and v["voters"] is None, "滿 3 人後顯示票數，匿名題不含名字")
+
+        # 匿名吐槽：文字題
+        rant = ask({"text": "Agent 今天做過最蠢的事？", "kind": "text"})
+        check(call("POST", f"/api/questions/{rant['id']}/vote", {"answer": "x" * 141}, B)[0] == 400, "文字回答超過 140 字會被拒絕")
+        call("POST", f"/api/questions/{rant['id']}/vote", {"answer": "把測試全部刪掉來讓測試通過"}, B)
+        call("POST", f"/api/questions/{rant['id']}/vote", {"answer": "幫我 rm -rf node_modules 三次"}, C)
+        _, v = call("POST", f"/api/questions/{rant['id']}/vote", {"answer": "說做完了其實沒做"}, A)
+        check(v["closed"] and len(v["texts"]) == 3 and all(t["name"] is None for t in v["texts"]) and v["my_text"] == "說做完了其實沒做",
+              "文字題開獎：列出所有回答，匿名題不含名字")
+        check(ask({"text": "隨便問問看", "kind": "essay"}).get("error") == "不支援的題型", "不支援的題型會被拒絕")
+        check("error" in ask({"text": "選項太多的題目", "options": list("abcdefg")}), "選項超過 6 個會被拒絕")
 
         print("F. 上線防護")
         check(call("GET", "/healthz") == (200, {"ok": True}), "健康檢查 /healthz")

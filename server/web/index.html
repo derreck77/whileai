@@ -51,6 +51,13 @@
   .hint { background: var(--warn-soft); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
   .invite { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1px; }
   .opts-edit .row { flex-wrap: nowrap; margin-bottom: 8px; }
+  .check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .check input { width: auto; }
+  .scale { display: flex; gap: 6px; } .scale .opt { text-align: center; font-weight: 700; margin-top: 8px; }
+  textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+             border-radius: 10px; padding: 9px 12px; width: 100%; resize: vertical; min-height: 64px; margin-top: 8px; }
+  .named { color: #d9822b; } .voters { font-size: 12px; color: var(--muted); margin: -4px 0 8px; }
+  .answer { background: var(--bg); border-radius: 10px; padding: 8px 12px; margin-top: 6px; }
   .error { color: #d64545; font-size: 13px; min-height: 1em; margin-top: 6px; }
   .tabs { display: flex; gap: 4px; margin: 20px 0 4px; }
   .tabs button { background: transparent; color: var(--muted); padding: 6px 12px; }
@@ -235,13 +242,23 @@ async function renderGroup(gid) {
 
     <h2>出題</h2>
     <div class="card" id="ask">
-      <input id="qtext" maxlength="120" placeholder="想問大家什麼？例如：下個 sprint 要不要統一改用 Codex？">
-      <div class="opts-edit" id="opts" style="margin-top:10px"></div>
-      <div class="row" style="justify-content:space-between">
+      <div class="row" style="flex-wrap:nowrap;margin-bottom:10px">
+        <select id="kind" style="width:auto">
+          <option value="choice">單選</option><option value="multi">多選</option>
+          <option value="scale">評分 1–5</option><option value="text">文字回答</option></select>
+        <input id="qtext" maxlength="120" placeholder="想問大家什麼？例如：中午吃什麼？">
+      </div>
+      <div class="opts-edit" id="opts"></div>
+      <div class="row" id="scale-labels" style="flex-wrap:nowrap;margin-bottom:8px;display:none">
+        <input id="low" maxlength="12" placeholder="1 分代表…"><input id="high" maxlength="12" placeholder="5 分代表…"></div>
+      <label class="check"><input type="checkbox" id="anon" checked> 匿名（滿 3 人回答才顯示結果；不勾就是具名）</label>
+      <label class="check"><input type="checkbox" id="live"> 回答後立刻看到結果（不勾就是截止才開獎）</label>
+      <div class="row" style="justify-content:space-between;margin-top:8px">
         <button class="ghost" id="addopt">＋ 新增選項</button>
         <span class="row"><select id="hours" style="width:auto">
-          <option value="4">4 小時後截止</option><option value="24" selected>24 小時後截止</option>
-          <option value="48">48 小時後截止</option><option value="72">3 天後截止</option></select>
+          <option value="0.5">30 分鐘後截止</option><option value="1">1 小時後截止</option>
+          <option value="4">4 小時後截止</option><option value="24" selected>1 天後截止</option>
+          <option value="72">3 天後截止</option></select>
         <button id="send">發問</button></span>
       </div>
       <div class="error" id="err"></div>
@@ -259,17 +276,29 @@ async function renderGroup(gid) {
     document.getElementById('opts').innerHTML = opts.map((o, i) => `<div class="row">
         <input data-opt="${i}" maxlength="40" placeholder="選項 ${i + 1}" value="${esc(o)}">
         ${opts.length > 2 ? `<button class="ghost" data-del="${i}" aria-label="刪除">✕</button>` : ''}</div>`).join('');
-    document.getElementById('addopt').disabled = opts.length >= 4;
+    document.getElementById('addopt').disabled = opts.length >= 6;
   };
   drawOpts();
+  const kindSel = document.getElementById('kind');
+  const syncKind = () => {
+    const hasOpts = kindSel.value === 'choice' || kindSel.value === 'multi';
+    document.getElementById('opts').style.display = hasOpts ? '' : 'none';
+    document.getElementById('addopt').style.visibility = hasOpts ? 'visible' : 'hidden';
+    document.getElementById('scale-labels').style.display = kindSel.value === 'scale' ? 'flex' : 'none';
+  };
+  kindSel.onchange = syncKind; syncKind();
   document.getElementById('opts').oninput = e => { if (e.target.dataset.opt) opts[+e.target.dataset.opt] = e.target.value; };
   document.getElementById('opts').onclick = e => { const d = e.target.dataset.del; if (d !== undefined) { opts.splice(+d, 1); drawOpts(); } };
-  document.getElementById('addopt').onclick = () => { if (opts.length < 4) { opts.push(''); drawOpts(); } };
+  document.getElementById('addopt').onclick = () => { if (opts.length < 6) { opts.push(''); drawOpts(); } };
   document.getElementById('send').onclick = async () => {
     try {
       await api('POST', `/api/groups/${gid}/questions`, {
         text: document.getElementById('qtext').value,
+        kind: kindSel.value,
         options: opts.map(o => o.trim()).filter(Boolean),
+        config: { low: document.getElementById('low').value.trim(), high: document.getElementById('high').value.trim() },
+        anonymous: document.getElementById('anon').checked,
+        live: document.getElementById('live').checked,
         hours: +document.getElementById('hours').value,
       });
       tab = 'open'; renderGroup(gid);
@@ -284,31 +313,68 @@ async function renderGroup(gid) {
     await api('POST', `/api/groups/${gid}/mute`, { muted: !g.muted }); renderGroup(gid);
   };
   document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; renderGroup(gid); });
-  document.querySelectorAll('[data-vote]').forEach(b => b.onclick = async () => {
-    const [qid, opt] = b.dataset.vote.split(':').map(Number);
-    try { await api('POST', `/api/questions/${qid}/vote`, { option: opt }); renderGroup(gid); }
+  const send = async (qid, answer) => {
+    try { await api('POST', `/api/questions/${qid}/vote`, { answer }); renderGroup(gid); }
     catch (e) { alert(e.message); renderGroup(gid); }
+  };
+  document.querySelectorAll('[data-vote]').forEach(b => b.onclick = () => {
+    const [qid, opt] = b.dataset.vote.split(':').map(Number); send(qid, opt);
+  });
+  document.querySelectorAll('[data-multi]').forEach(b => b.onclick = () => {
+    const qid = +b.dataset.multi;
+    const picked = [...document.querySelectorAll(`[data-pick="${qid}"]:checked`)].map(c => +c.value);
+    if (picked.length) send(qid, picked); else alert('請至少選一個選項');
+  });
+  document.querySelectorAll('[data-text]').forEach(b => b.onclick = () => {
+    const qid = +b.dataset.text;
+    const v = document.getElementById('text-' + qid).value.trim();
+    if (v) send(qid, v);
   });
 }
 
 function questionCard(q) {
+  const kind = q.kind || 'choice';
   const meta = `<div class="q-meta">${esc(q.author_name)} 出題 · ${q.answered_count}／${q.member_count} 人已答 · ${q.closed ? '已開獎' : timeLeft(q.closes_at)}</div>`;
+  const privacy = q.anonymous === false
+    ? `<p class="faint named" style="margin:8px 0 0">具名 · 大家會看到你的回答${q.live ? ' · 回答後立刻看結果' : ''}</p>`
+    : `<p class="faint" style="margin:8px 0 0">匿名 · ≥3 人回答才公開${q.live ? ' · 回答後立刻看結果' : ''}</p>`;
+  const scaleLabels = (q.scale_low || q.scale_high)
+    ? `<div class="row faint" style="justify-content:space-between"><span>${q.scale_low ? '1 = ' + esc(q.scale_low) : ''}</span><span>${q.scale_high ? '5 = ' + esc(q.scale_high) : ''}</span></div>` : '';
   let body;
-  if (q.closed && q.results) {
-    const total = q.results.reduce((a, b) => a + b, 0) || 1;
-    body = q.options.map((o, i) => {
+  if (q.texts) {
+    body = q.texts.map(t => `<div class="answer">${esc(t.text)}${t.name ? `<div class="faint">${esc(t.name)}</div>` : ''}</div>`).join('');
+  } else if (q.results) {
+    const votes = q.results.reduce((a, b) => a + b, 0);
+    const total = (kind === 'multi' ? q.answered_count : votes) || 1;   // 多選題以回答人數為分母
+    const mine = i => i === q.my_vote || (q.my_votes || []).includes(i);
+    body = '';
+    if (kind === 'scale') {
+      const sum = q.results.reduce((a, n, i) => a + n * (i + 1), 0);
+      body += `<div style="font-weight:700;font-size:18px">平均 ${(sum / (votes || 1)).toFixed(1)} 分</div>${scaleLabels}`;
+    }
+    body += q.options.map((o, i) => {
       const pct = Math.round(q.results[i] / total * 100);
-      return `<div class="row" style="justify-content:space-between"><span>${esc(o)}${i === q.my_vote ? '（你）' : ''}</span>
+      const names = q.voters && q.voters[i].length ? `<div class="voters">${q.voters[i].map(esc).join('、')}</div>` : '';
+      return `<div class="row" style="justify-content:space-between"><span>${kind === 'scale' ? (i + 1) + ' 分' : esc(o)}${mine(i) ? '（你）' : ''}</span>
         <span class="muted">${pct}% · ${q.results[i]} 票</span></div>
-        <div class="bar ${i === q.my_vote ? 'mine' : ''}"><i style="width:${pct}%"></i></div>`;
+        <div class="bar ${mine(i) ? 'mine' : ''}"><i style="width:${Math.min(pct, 100)}%"></i></div>${names}`;
     }).join('');
   } else if (q.closed) {
-    body = `<p class="muted">${esc(q.hidden_reason)}</p>`;
-  } else if (q.my_vote !== null) {
-    body = `<p class="badge done">✓ 你選了「${esc(q.options[q.my_vote])}」· 開獎時公布結果</p>`;
+    body = `<p class="muted">${esc(q.hidden_reason || '結果未公開')}</p>`;
+  } else if (q.my_answered) {
+    body = `<p class="badge done">✓ 已回答 · ${esc(q.hidden_reason || '開獎時公布結果')}</p>`;
+  } else if (kind === 'multi') {
+    body = q.options.map((o, i) => `<label class="check opt" style="padding:9px 12px;border-radius:10px">
+        <input type="checkbox" data-pick="${q.id}" value="${i}"> <span style="color:var(--text)">${esc(o)}</span></label>`).join('')
+      + `<button style="margin-top:8px" data-multi="${q.id}">送出</button>` + privacy;
+  } else if (kind === 'scale') {
+    body = `<div class="scale">${[0, 1, 2, 3, 4].map(i => `<button class="opt" data-vote="${q.id}:${i}">${i + 1}</button>`).join('')}</div>`
+      + scaleLabels + privacy;
+  } else if (kind === 'text') {
+    body = `<textarea id="text-${q.id}" maxlength="140" placeholder="寫下你的回答（最多 140 字）"></textarea>
+      <button style="margin-top:8px" data-text="${q.id}">送出</button>` + privacy;
   } else {
-    body = q.options.map((o, i) => `<button class="opt" data-vote="${q.id}:${i}">${esc(o)}</button>`).join('')
-      + `<p class="faint" style="margin:8px 0 0">匿名 · ≥3 人回答才公開</p>`;
+    body = q.options.map((o, i) => `<button class="opt" data-vote="${q.id}:${i}">${esc(o)}</button>`).join('') + privacy;
   }
   return `<div class="card">${meta}<div class="q-text">${esc(q.text)}</div>${body}</div>`;
 }

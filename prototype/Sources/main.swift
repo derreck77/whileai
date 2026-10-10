@@ -74,6 +74,39 @@ if CommandLine.arguments.dropFirst().first == "snapshot" {
         m.serverLabel = "whileai-production.up.railway.app"; return m }()))
     cases.append(("12-connect", model(.connect, stack: [])))
 
+    // 新題型
+    func card(_ name: String, _ question: Question, agent: String = "Codex") {
+        let m = model(.card, stack: []); m.question = question; m.agentName = agent
+        if name.contains("multi") { m.multiSelection = [0, 2] }
+        cases.append((name, m))
+    }
+    let lunch = Question(id: 10, groupId: 1, groupName: "後端組", authorName: "美玲", isMine: false, text: "中午吃什麼？",
+                     options: ["便當", "麵", "輕食"], closesAt: now + 1800, closed: false, answeredCount: 6, memberCount: 8,
+                     myVote: 0, results: [3, 2, 1], hiddenReason: nil, kind: "choice", anonymous: false, live: true,
+                     myAnswered: true, voters: [["derreck", "阿凱", "小林"], ["美玲", "Ray"], ["Tina"]])
+    card("13-card-lunch-live-named", lunch)
+    card("14-card-multi", Question(id: 11, groupId: 1, groupName: "後端組", authorName: "阿凱", isMine: false,
+         text: "幾點開會方便？（可複選）", options: ["10:00", "14:00", "16:00"], closesAt: now + 4 * 3600, closed: false,
+         answeredCount: 2, memberCount: 8, myVote: nil, results: nil, hiddenReason: nil, kind: "multi",
+         anonymous: false, live: true), agent: "Claude Code")
+    card("15-card-scale", Question(id: 12, groupId: 1, groupName: "後端組", authorName: "小林", isMine: false,
+         text: "這個 sprint 壓力多大？", options: ["1", "2", "3", "4", "5"], closesAt: now + 86400, closed: false,
+         answeredCount: 1, memberCount: 8, myVote: nil, results: nil, hiddenReason: nil, kind: "scale",
+         scaleLow: "很輕鬆", scaleHigh: "快爆了"))
+    card("16-card-scale-result", Question(id: 13, groupId: 1, groupName: "後端組", authorName: "小林", isMine: false,
+         text: "這個 sprint 壓力多大？", options: ["1", "2", "3", "4", "5"], closesAt: now - 10, closed: true,
+         answeredCount: 7, memberCount: 8, myVote: 3, results: [0, 1, 2, 3, 1], hiddenReason: nil, kind: "scale",
+         scaleLow: "很輕鬆", scaleHigh: "快爆了", myAnswered: true))
+    card("17-card-text-result", Question(id: 14, groupId: 1, groupName: "後端組", authorName: "阿凱", isMine: false,
+         text: "Agent 今天做過最蠢的事？", options: [], closesAt: now - 10, closed: true, answeredCount: 3, memberCount: 8,
+         myVote: nil, results: nil, hiddenReason: nil, kind: "text", myAnswered: true,
+         texts: [TextAnswer(text: "把測試全部刪掉，然後說測試都通過了", name: nil),
+                 TextAnswer(text: "連續三次 rm -rf node_modules", name: nil),
+                 TextAnswer(text: "說做完了，其實什麼都沒改", name: nil)]))
+    cases.append(("18-ask-lunch", { let m = model(.ask(1), stack: [.home, .group(1)])
+        let t = AskTemplate.all[1]; m.askTemplate = t.id; m.askKind = t.kind; m.askText = t.text
+        m.askOptions = t.options; m.askAnonymous = t.anonymous; m.askLive = t.live; m.askHours = t.hours; return m }()))
+
     MainActor.assumeIsolated {
         for (name, m) in cases {
             let r = ImageRenderer(content: PanelView(m: m).padding(20).background(Color(white: 0.9)))

@@ -29,6 +29,61 @@ struct Question: Codable, Equatable, Identifiable {
     let myVote: Int?
     let results: [Int]?
     let hiddenReason: String?
+    // 以下欄位由較新的後端提供；舊後端沒有時用預設值
+    var kind: String? = nil           // choice | multi | scale | text
+    var anonymous: Bool? = nil
+    var live: Bool? = nil             // 回答後立刻看結果
+    var scaleLow: String? = nil
+    var scaleHigh: String? = nil
+    var myAnswered: Bool? = nil
+    var myVotes: [Int]? = nil         // 多選題
+    var myText: String? = nil         // 文字題
+    var voters: [[String]]? = nil     // 具名題：各選項的回答者
+    var texts: [TextAnswer]? = nil    // 文字題的回答
+
+    var qKind: String { kind ?? "choice" }
+    var isAnonymous: Bool { anonymous ?? true }
+    var isLive: Bool { live ?? false }
+    var answered: Bool { myAnswered ?? (myVote != nil) }
+    var hasResults: Bool { results != nil || texts != nil }
+
+    func isMyChoice(_ i: Int) -> Bool { myVote == i || (myVotes?.contains(i) ?? false) }
+}
+
+struct TextAnswer: Codable, Equatable {
+    let text: String
+    let name: String?
+}
+
+// 出題範本：把常見情境的設定一次帶入，內容可以再改
+struct AskTemplate: Identifiable, Equatable {
+    let id: String
+    let label: String
+    let kind: String
+    let text: String
+    let options: [String]
+    let anonymous: Bool
+    let live: Bool
+    let hours: Double
+    var low = ""
+    var high = ""
+
+    static let all: [AskTemplate] = [
+        AskTemplate(id: "custom", label: "✏️ 自訂", kind: "choice", text: "", options: ["", ""],
+                    anonymous: true, live: false, hours: 24),
+        AskTemplate(id: "lunch", label: "🍱 午餐", kind: "choice", text: "中午吃什麼？",
+                    options: ["便當", "麵", "輕食", "都可以"], anonymous: false, live: true, hours: 1),
+        AskTemplate(id: "plus1", label: "🙋 揪團 +1", kind: "choice", text: "誰要一起去買咖啡？",
+                    options: ["+1", "這次不了"], anonymous: false, live: true, hours: 0.5),
+        AskTemplate(id: "decide", label: "⚡ 快速決定", kind: "choice", text: "",
+                    options: ["贊成", "反對", "都可以"], anonymous: true, live: true, hours: 4),
+        AskTemplate(id: "time", label: "🗓 喬時間", kind: "multi", text: "幾點開會方便？（可複選）",
+                    options: ["10:00", "14:00", "16:00"], anonymous: false, live: true, hours: 4),
+        AskTemplate(id: "mood", label: "🌡 心情", kind: "scale", text: "這週工作順不順？", options: [],
+                    anonymous: true, live: false, hours: 24, low: "很卡", high: "很順"),
+        AskTemplate(id: "rant", label: "🤐 匿名吐槽", kind: "text", text: "Agent 今天做過最蠢的事？", options: [],
+                    anonymous: true, live: false, hours: 24),
+    ]
 }
 
 struct Feed: Codable {
