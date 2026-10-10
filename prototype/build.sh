@@ -11,11 +11,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # 有些機器的預設 SDK 比 swiftc 新而無法編譯，換舊一點的 SDK 就可以。
 compile() { swiftc -O ${@+"$@"} -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/WhileAI" Sources/*.swift; }
 if ! compile 2>/dev/null; then
-  ok=0
+  ok=0; last=""
   for sdk in $(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX[0-9]*.sdk 2>/dev/null | sort -r); do
+    last="$sdk"
     if compile -sdk "$sdk" 2>/dev/null; then ok=1; break; fi
   done
-  [ "$ok" = 1 ] || { echo "編譯失敗，以下是錯誤訊息："; compile; exit 1; }
+  # 全部失敗時，顯示最舊那個 SDK 的錯誤：它最不可能是「SDK 太新」，看到的才是程式碼本身的問題
+  [ "$ok" = 1 ] || { echo "編譯失敗，以下是錯誤訊息："; compile ${last:+-sdk "$last"}; exit 1; }
 fi
 
 # 內附後端：App 連不上本機伺服器時會自己啟動它

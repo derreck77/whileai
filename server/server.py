@@ -199,8 +199,9 @@ class Store:
                               (name, self.new_invite_code(), user["id"], t))
         gid = cur.lastrowid
         self.db.execute("INSERT INTO members (group_id, user_id, joined_at) VALUES (?, ?, ?)", (gid, user["id"], t))
+        # 新群組一開始只有 1–2 人，匿名題（需滿 3 人）永遠不會開獎，所以起手題用具名＋回答後立刻看結果
         for text, kind, options, config in STARTER_QUESTIONS:
-            self.insert_question(gid, None, text, kind, options, config, True, False, t, 48)
+            self.insert_question(gid, None, text, kind, options, config, False, True, t, 72)
         return gid
 
     def group_row(self, gid):
@@ -333,6 +334,25 @@ class Store:
         if members >= MIN_REVEAL and self.answered_count(qid) >= members:
             self.db.execute("UPDATE questions SET closed_at = ? WHERE id = ?", (now(), qid))
 
+    def require_author(self, user, qid):
+        q = self.question_row(qid)
+        self.require_member(q["group_id"], user)
+        if q["author_id"] != user["id"]:
+            raise ApiError(403, "只有出題者可以這樣做")
+        return q
+
+    def close_question(self, user, qid):
+        """出題者提前開獎。"""
+        q = self.require_author(user, qid)
+        if not self.is_closed(q):
+            self.db.execute("UPDATE questions SET closed_at = ? WHERE id = ?", (now(), qid))
+
+    def delete_question(self, user, qid):
+        """出題者撤回題目，連同所有回答一起刪除。"""
+        self.require_author(user, qid)
+        self.db.execute("DELETE FROM votes WHERE question_id = ?", (qid,))
+        self.db.execute("DELETE FROM questions WHERE id = ?", (qid,))
+
     @staticmethod
     def is_closed(q):
         return q["closed_at"] is not None or now() >= q["closes_at"]
@@ -424,8 +444,8 @@ class Store:
         }
 
     def feed(self, user):
-        """App 用：待答題（未靜音群組、未截止、我還沒答）與近 7 天開獎（我出的題或我答過的題）。"""
-        pending, results = [], []
+        """App 用：待答題（未靜音群組、未截止、我還沒答）、近 7 天開獎（我出的題或我答過的題）、我出的進行中題目。"""
+        pending, results, mine = [], [], []
         rows = self.db.execute(
             "SELECT q.*, g.name AS group_name, m.muted FROM questions q "
             "JOIN groups g ON g.id = q.group_id "
@@ -437,9 +457,11 @@ class Store:
             if not v["closed"]:
                 if not v["my_answered"] and not q["muted"]:
                     pending.append(v)
+                if v["is_mine"]:
+                    mine.append(v)
             elif v["closed_at"] >= now() - 7 * 86400 and (v["my_answered"] or v["is_mine"]):
                 results.append(v)
-        return {"pending": pending, "results": results}
+        return {"pending": pending, "results": results, "mine": mine}
 
 
 # ---------- 頻率限制（記憶體內滑動視窗，以來源 IP 計算） ----------
@@ -556,6 +578,18 @@ def api_vote(h, user, body, qid):
     return h.store.question_view(h.store.question_row(int(qid)), user)
 
 
+@route("POST", r"/api/questions/(\d+)/close")
+def api_close(h, user, body, qid):
+    h.store.close_question(user, int(qid))
+    return h.store.question_view(h.store.question_row(int(qid)), user)
+
+
+@route("DELETE", r"/api/questions/(\d+)")
+def api_delete(h, user, body, qid):
+    h.store.delete_question(user, int(qid))
+    return {"ok": True}
+
+
 @route("GET", "/api/feed")
 def api_feed(h, user, body):
     return h.store.feed(user)
@@ -658,7 +692,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400, {"error": "JSON 格式錯誤"})
         return self.send_json(404, {"error": "not found"})
 
-    do_GET = do_POST = do_PATCH = dispatch
+    do_GET = do_POST = do_PATCH = do_DELETE = dispatch
 
 
 def main():

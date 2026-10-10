@@ -4,7 +4,7 @@
 //   WhileAI                       選單列 App（常駐）
 //   WhileAI hook [codex|claude-code]
 //                                 給 Codex／Claude Code hooks 呼叫：讀 stdin，只轉送事件名稱給常駐 App 後立即結束
-//   WhileAI snapshot <dir>        開發用：把小框框的各個畫面渲染成 PNG
+//   WhileAI snapshot <dir> [--dark]  開發用：把小框框的各個畫面渲染成 PNG
 import AppKit
 import SwiftUI
 
@@ -33,83 +33,102 @@ if CommandLine.arguments.dropFirst().first == "hook" {
 
 if CommandLine.arguments.dropFirst().first == "snapshot" {
     let out = URL(fileURLWithPath: CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : ".")
+    let dark = CommandLine.arguments.contains("--dark")
     let now = Date().timeIntervalSince1970
-    func q(_ id: Int, _ text: String, author: String = "小林", myVote: Int? = nil, closed: Bool = false,
-           results: [Int]? = nil, hidden: String? = nil, answered: Int = 3) -> Question {
-        Question(id: id, groupId: 1, groupName: "後端組", authorName: author, isMine: false, text: text,
-                 options: ["要", "不要", "先試一週再說"], closesAt: now + 5 * 3600, closed: closed,
-                 answeredCount: answered, memberCount: 8, myVote: myVote, results: results, hiddenReason: hidden)
+    func q(_ id: Int, _ text: String, author: String = "小林", mine: Bool = false, kind: String = "choice",
+           options: [String] = ["要", "不要", "先試一週再說"], anonymous: Bool = true, live: Bool = false,
+           answered: Int = 3, closed: Bool = false, myVote: Int? = nil, results: [Int]? = nil,
+           hidden: String? = nil, closes: Double = 5 * 3600) -> Question {
+        Question(id: id, groupId: 1, groupName: "後端組", authorName: author, isMine: mine, text: text,
+                 options: options, closesAt: now + closes, closed: closed, answeredCount: answered, memberCount: 8,
+                 myVote: myVote, results: results, hiddenReason: hidden, kind: kind, anonymous: anonymous, live: live,
+                 myAnswered: myVote != nil)
     }
-    let pending = [q(1, "下個 sprint 要不要統一改用 Codex？"), q(2, "Agent 寫的測試你會直接 merge 嗎？", author: "阿凱")]
-    let result = q(3, "要不要把 lint 交給 Agent 自動修？", myVote: 2, closed: true, results: [2, 1, 5], answered: 8)
+    let pending = [q(1, "下個 sprint 要不要統一改用 Codex？"),
+                   q(2, "幾點開會方便？（可複選）", author: "阿凱", kind: "multi", options: ["10:00", "14:00", "16:00"],
+                     anonymous: false, live: true)]
+    let result = q(3, "要不要把 lint 交給 Agent 自動修？", answered: 8, closed: true, myVote: 2, results: [2, 1, 5])
+    let myOpen = q(5, "下午要不要訂飲料？", author: "derreck", mine: true, options: ["要", "不要"],
+                   anonymous: false, live: true, answered: 5, myVote: 0, results: [4, 1], closes: 1800)
     let groups = [Group(id: 1, name: "後端組", inviteCode: "K7P3QX9M", inviteUrl: "https://x/j/K7P3QX9M", memberCount: 8, muted: false),
-                  Group(id: 2, name: "大學同學", inviteCode: "M2RT8WQA", inviteUrl: "https://x/j/M2RT8WQA", memberCount: 5, muted: true)]
+                  Group(id: 2, name: "大學同學", inviteCode: "M2RT8WQA", inviteUrl: "https://x/j/M2RT8WQA", memberCount: 2, muted: true)]
     let me = Me(user: UserInfo(id: 1, name: "derreck"), groups: groups)
-    let detail = GroupDetail(group: groups[0], questions: pending + [q(4, "週五 demo 要用哪個 Agent 現場寫？", myVote: 1), result])
+    let detail = GroupDetail(group: groups[0], questions: pending + [myOpen, result])
 
     func model(_ screen: Screen, stack: [Screen] = [.home]) -> Model {
         let m = Model()
+        m.preview = true
         m.screen = screen
         m.stack = stack
         m.me = me
-        m.feed = Feed(pending: pending, results: [result])
+        m.feed = Feed(pending: pending, results: [result], mine: [myOpen])
         m.unseenResults = [result]
-        m.details = [1: detail]
+        m.details = [1: detail, 2: GroupDetail(group: groups[1], questions: [])]
+        m.askGroupId = 1
         return m
     }
-    var cases: [(String, Model)] = []
-    cases.append(("01-welcome", { let m = model(.welcome, stack: []); m.nickname = "derreck"; return m }()))
-    cases.append(("02-home", model(.home, stack: [])))
-    cases.append(("03-group", model(.group(1))))
-    cases.append(("04-create", { let m = model(.createGroup); m.groupName = "週末黑客松"; return m }()))
-    cases.append(("05-join", { let m = model(.join); m.joinCode = "K7P3QX9M"; return m }()))
-    cases.append(("06-ask", { let m = model(.ask(1), stack: [.home, .group(1)])
-        m.askText = "Agent 寫的 PR，你會要求它附測試嗎？"; m.askOptions = ["一定要", "看情況", "不用"]; return m }()))
-    cases.append(("07-question", { let m = model(.question, stack: [.home]); m.question = pending[0]; return m }()))
-    cases.append(("08-card-ask", { let m = model(.card, stack: []); m.question = pending[0]; return m }()))
-    cases.append(("09-card-result", { let m = model(.card, stack: []); m.question = result; m.phase = .done
-        m.agentName = "Claude Code"; return m }()))
-    cases.append(("10-card-onboarding", { let m = model(.card, stack: []); m.onboarding = true; return m }()))
-    cases.append(("11-settings", { let m = model(.settings); m.nickname = "derreck"
-        m.serverLabel = "whileai-production.up.railway.app"; return m }()))
-    cases.append(("12-connect", model(.connect, stack: [])))
-
-    // 新題型
-    func card(_ name: String, _ question: Question, agent: String = "Codex") {
-        let m = model(.card, stack: []); m.question = question; m.agentName = agent
-        if name.contains("multi") { m.multiSelection = [0, 2] }
-        cases.append((name, m))
+    func apply(_ m: Model, _ t: AskTemplate) {
+        m.askTemplate = t.id; m.askKind = t.kind; m.askText = t.text
+        m.askOptions = t.options.isEmpty ? ["", ""] : t.options
+        m.askAnonymous = t.anonymous; m.askLive = t.live; m.askHours = t.hours; m.askLow = t.low; m.askHigh = t.high
     }
-    let lunch = Question(id: 10, groupId: 1, groupName: "後端組", authorName: "美玲", isMine: false, text: "中午吃什麼？",
-                     options: ["便當", "麵", "輕食"], closesAt: now + 1800, closed: false, answeredCount: 6, memberCount: 8,
-                     myVote: 0, results: [3, 2, 1], hiddenReason: nil, kind: "choice", anonymous: false, live: true,
-                     myAnswered: true, voters: [["derreck", "阿凱", "小林"], ["美玲", "Ray"], ["Tina"]])
-    card("13-card-lunch-live-named", lunch)
-    card("14-card-multi", Question(id: 11, groupId: 1, groupName: "後端組", authorName: "阿凱", isMine: false,
-         text: "幾點開會方便？（可複選）", options: ["10:00", "14:00", "16:00"], closesAt: now + 4 * 3600, closed: false,
-         answeredCount: 2, memberCount: 8, myVote: nil, results: nil, hiddenReason: nil, kind: "multi",
-         anonymous: false, live: true), agent: "Claude Code")
-    card("15-card-scale", Question(id: 12, groupId: 1, groupName: "後端組", authorName: "小林", isMine: false,
-         text: "這個 sprint 壓力多大？", options: ["1", "2", "3", "4", "5"], closesAt: now + 86400, closed: false,
-         answeredCount: 1, memberCount: 8, myVote: nil, results: nil, hiddenReason: nil, kind: "scale",
-         scaleLow: "很輕鬆", scaleHigh: "快爆了"))
-    card("16-card-scale-result", Question(id: 13, groupId: 1, groupName: "後端組", authorName: "小林", isMine: false,
-         text: "這個 sprint 壓力多大？", options: ["1", "2", "3", "4", "5"], closesAt: now - 10, closed: true,
-         answeredCount: 7, memberCount: 8, myVote: 3, results: [0, 1, 2, 3, 1], hiddenReason: nil, kind: "scale",
-         scaleLow: "很輕鬆", scaleHigh: "快爆了", myAnswered: true))
-    card("17-card-text-result", Question(id: 14, groupId: 1, groupName: "後端組", authorName: "阿凱", isMine: false,
-         text: "Agent 今天做過最蠢的事？", options: [], closesAt: now - 10, closed: true, answeredCount: 3, memberCount: 8,
-         myVote: nil, results: nil, hiddenReason: nil, kind: "text", myAnswered: true,
-         texts: [TextAnswer(text: "把測試全部刪掉，然後說測試都通過了", name: nil),
-                 TextAnswer(text: "連續三次 rm -rf node_modules", name: nil),
-                 TextAnswer(text: "說做完了，其實什麼都沒改", name: nil)]))
-    cases.append(("18-ask-lunch", { let m = model(.ask(1), stack: [.home, .group(1)])
-        let t = AskTemplate.all[1]; m.askTemplate = t.id; m.askKind = t.kind; m.askText = t.text
-        m.askOptions = t.options; m.askAnonymous = t.anonymous; m.askLive = t.live; m.askHours = t.hours; return m }()))
+    var cases: [(String, Model)] = []
+    func add(_ name: String, _ screen: Screen, stack: [Screen] = [.home], _ setup: (Model) -> Void = { _ in }) {
+        let m = model(screen, stack: stack); setup(m); cases.append((name, m))
+    }
+
+    add("01-welcome", .welcome, stack: []) { $0.nickname = "derreck" }
+    add("02-home-empty", .home, stack: []) { $0.me = Me(user: UserInfo(id: 1, name: "derreck"), groups: []) }
+    add("03-home", .home, stack: [])
+    add("04-group", .group(1)) { $0.notice = "已發出。7 位成員會在等 Agent 時看到。" }
+    add("05-group-small", .group(2))
+    add("06-create", .createGroup) { $0.groupName = "週末黑客松" }
+    add("07-join", .join)
+    add("08-ask-lunch", .ask) { apply($0, AskTemplate.all[1]) }
+    add("09-ask-settings", .ask) { apply($0, AskTemplate.all[5]); $0.askShowSettings = true }
+    add("10-ask-small-group", .ask) { apply($0, AskTemplate.all[6]); $0.askGroupId = 2 }
+    add("11-question-mine", .question) { $0.question = myOpen }
+    add("12-settings", .settings) { $0.nickname = "derreck"; $0.serverLabel = "whileai-production.up.railway.app" }
+
+    add("20-card-choice", .card, stack: []) { $0.question = pending[0]; $0.remaining = 1 }
+    add("21-card-multi", .card, stack: []) { $0.question = pending[1]; $0.multiSelection = [0, 2]; $0.agentName = "Claude Code" }
+    add("22-card-scale", .card, stack: []) {
+        var s = q(12, "這個 sprint 壓力多大？", kind: "scale", options: ["1", "2", "3", "4", "5"], answered: 1)
+        s.scaleLow = "很輕鬆"; s.scaleHigh = "快爆了"; $0.question = s
+    }
+    add("23-card-text", .card, stack: []) {
+        $0.question = q(14, "Agent 今天做過最蠢的事？", author: "阿凱", kind: "text", options: [])
+        $0.answerText = "把測試全部刪掉，然後說測試都通過了"
+    }
+    add("24-card-answered-next", .card, stack: []) {
+        var a = pending[0]; a.myAnswered = true; $0.question = a; $0.remaining = 2
+    }
+    add("25-card-named-live", .card, stack: []) {
+        var l = q(10, "中午吃什麼？", author: "美玲", options: ["便當", "麵", "輕食"], anonymous: false, live: true,
+                  answered: 6, myVote: 0, results: [3, 2, 1], closes: 1800)
+        l.voters = [["derreck", "阿凱", "小林"], ["美玲", "Ray"], ["Tina"]]; $0.question = l
+    }
+    add("26-card-scale-result", .card, stack: []) {
+        var s = q(13, "這個 sprint 壓力多大？", kind: "scale", options: ["1", "2", "3", "4", "5"], answered: 7,
+                  closed: true, myVote: 3, results: [0, 1, 2, 3, 1])
+        s.scaleLow = "很輕鬆"; s.scaleHigh = "快爆了"; $0.question = s; $0.phase = .done
+    }
+    add("27-card-text-result", .card, stack: []) {
+        var t = q(15, "Agent 今天做過最蠢的事？", author: "阿凱", kind: "text", options: [], answered: 3, closed: true)
+        t.myAnswered = true
+        t.texts = [TextAnswer(text: "把測試全部刪掉，然後說測試都通過了", name: nil),
+                   TextAnswer(text: "連續三次 rm -rf node_modules", name: nil),
+                   TextAnswer(text: "說做完了，其實什麼都沒改", name: nil)]
+        $0.question = t
+    }
+    add("28-card-onboarding", .card, stack: []) { $0.onboarding = true }
 
     MainActor.assumeIsolated {
         for (name, m) in cases {
-            let r = ImageRenderer(content: PanelView(m: m).padding(20).background(Color(white: 0.9)))
+            let view = PanelView(m: m).padding(24)
+                .background(dark ? Color(white: 0.12) : Color(white: 0.9))
+                .environment(\.colorScheme, dark ? .dark : .light)
+            let r = ImageRenderer(content: view)
             r.scale = 2
             if let img = r.nsImage, let tiff = img.tiffRepresentation,
                let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {

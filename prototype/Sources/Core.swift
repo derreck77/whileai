@@ -48,6 +48,39 @@ struct Question: Codable, Equatable, Identifiable {
     var hasResults: Bool { results != nil || texts != nil }
 
     func isMyChoice(_ i: Int) -> Bool { myVote == i || (myVotes?.contains(i) ?? false) }
+
+    var kindSymbol: String {
+        switch qKind {
+        case "multi": return "checklist"
+        case "scale": return "gauge.with.dots.needle.33percent"
+        case "text": return "text.bubble"
+        default: return "circle.inset.filled"
+        }
+    }
+
+    var kindLabel: String {
+        switch qKind {
+        case "multi": return "多選"
+        case "scale": return "評分"
+        case "text": return "文字"
+        default: return "單選"
+        }
+    }
+}
+
+/// 從邀請訊息、邀請連結或單純的邀請碼裡，抓出 8 碼邀請碼
+func extractInviteCode(_ raw: String) -> String? {
+    let alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    let text = raw.uppercased()
+    for pattern in ["/J/([A-Z0-9]{8})", "JOIN/([A-Z0-9]{8})", "SETUP\\.SH\\s+([A-Z0-9]{8})", "邀請碼[：:\\s]*([A-Z0-9]{8})"] {
+        if let re = try? NSRegularExpression(pattern: pattern),
+           let m = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+           let r = Range(m.range(at: 1), in: text) {
+            return String(text[r])
+        }
+    }
+    let bare = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return bare.count == 8 && bare.allSatisfy({ alphabet.contains($0) }) ? bare : nil
 }
 
 struct TextAnswer: Codable, Equatable {
@@ -67,6 +100,9 @@ struct AskTemplate: Identifiable, Equatable {
     let hours: Double
     var low = ""
     var high = ""
+
+    var symbol: String { String(label.prefix(while: { $0 != " " })) }
+    var name: String { String(label.drop(while: { $0 != " " }).dropFirst()) }
 
     static let all: [AskTemplate] = [
         AskTemplate(id: "custom", label: "✏️ 自訂", kind: "choice", text: "", options: ["", ""],
@@ -89,6 +125,7 @@ struct AskTemplate: Identifiable, Equatable {
 struct Feed: Codable {
     let pending: [Question]
     let results: [Question]
+    var mine: [Question]? = nil       // 我出的、還在進行中的題目
 }
 
 struct Group: Codable, Equatable, Identifiable {
@@ -127,6 +164,7 @@ struct LocalState: Codable {
     var seenResults: [Int] = []
     var shownByDay: [String: [Int]] = [:]
     var onboardingShown = false
+    var lastGroupId: Int?             // 上次出題的群組，下次出題時預設選它
 
     init() {}
     init(from decoder: Decoder) throws {   // 舊版 state.json 沒有新欄位時用預設值
@@ -134,6 +172,7 @@ struct LocalState: Codable {
         seenResults = try c.decodeIfPresent([Int].self, forKey: .seenResults) ?? []
         shownByDay = try c.decodeIfPresent([String: [Int]].self, forKey: .shownByDay) ?? [:]
         onboardingShown = try c.decodeIfPresent(Bool.self, forKey: .onboardingShown) ?? false
+        lastGroupId = try c.decodeIfPresent(Int.self, forKey: .lastGroupId)
     }
 }
 

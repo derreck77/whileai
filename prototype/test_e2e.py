@@ -40,6 +40,19 @@ def events(data_dir):
     return [json.loads(l) for l in open(p)] if os.path.exists(p) else []
 
 
+def wait_last(data_dir, pred, timeout=15):
+    """輪詢到最後一筆事件符合條件為止；回傳最後一筆事件（逾時就回傳當下的最後一筆）。"""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        ev = events(data_dir)
+        last = ev[-1] if ev else None
+        if last and pred(last):
+            break
+        time.sleep(0.25)
+    return last or {}
+
+
 def check(cond, msg):
     global failed
     print(("  ✓ " if cond else "  ✗ ") + msg)
@@ -75,31 +88,34 @@ def main():
         check(not events(data), "沒有任何卡片")
 
         print("2. 長任務：顯示待答題 → Codex 完成 → 收起")
-        hook("UserPromptSubmit"); time.sleep(5.5)
-        ev = events(data)
-        check(ev and ev[-1]["type"] == "shown", f"顯示了待答題（題目 #{ev[-1].get('question') if ev else '-'}）")
-        hook("Stop"); time.sleep(3.5)
-        check(events(data)[-1]["type"] == "agent_done_while_shown", "Codex 完成時記錄並收起")
+        hook("UserPromptSubmit")
+        last = wait_last(data, lambda e: e["type"] == "shown")
+        check(last.get("type") == "shown", f"顯示了待答題（題目 #{last.get('question', '-')}）")
+        hook("Stop")
+        last = wait_last(data, lambda e: e["type"] == "agent_done_while_shown")
+        check(last.get("type") == "agent_done_while_shown", "Codex 完成時記錄並收起")
+        time.sleep(3.5)   # 等卡片收起
 
         print("3. 三人都回答 → 下一次等待先看到開獎")
         for u in (kai, mei, lin):
             r = call("POST", f"/api/questions/{q['id']}/vote", {"option": 2}, u["token"])
         check(r["closed"] and r["results"] == [0, 0, 3], "全員答完提早開獎")
-        hook("UserPromptSubmit"); time.sleep(5.5)
-        last = events(data)[-1]
-        check(last["type"] == "result_shown" and last["question"] == q["id"], "開獎卡片優先於待答題")
+        hook("UserPromptSubmit")
+        last = wait_last(data, lambda e: e["type"] == "result_shown")
+        check(last.get("type") == "result_shown" and last.get("question") == q["id"], "開獎卡片優先於待答題")
         state = json.load(open(os.path.join(data, "state.json")))
         check(q["id"] in state["seenResults"], "記住這次開獎已經看過")
 
         print("4. Codex 需要權限 → 卡片立刻收起")
-        hook("PermissionRequest"); time.sleep(1)
-        check(events(data)[-1]["type"] == "agent_needs_you", "收起並記錄")
-        hook("Stop"); time.sleep(0.5)
+        hook("PermissionRequest")
+        last = wait_last(data, lambda e: e["type"] == "agent_needs_you")
+        check(last.get("type") == "agent_needs_you", "收起並記錄")
+        hook("Stop"); time.sleep(1)
 
         print("5. 同一個開獎不會再出現")
-        hook("UserPromptSubmit"); time.sleep(5.5)
-        last = events(data)[-1]
-        check(last["type"] == "shown" and last.get("question") != q["id"], "這次顯示的是待答題，不是舊開獎")
+        hook("UserPromptSubmit")
+        last = wait_last(data, lambda e: e["type"] == "shown")
+        check(last.get("type") == "shown" and last.get("question") != q["id"], "這次顯示的是待答題，不是舊開獎")
         hook("Stop"); time.sleep(3)
 
         print("6. 隱私")

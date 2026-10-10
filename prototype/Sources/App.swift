@@ -66,11 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
             self.api.token = self.identity?.token
             self.api.onUnauthorized = { [weak self] in self?.identityRejected() }
             self.model.canConnectAgents = self.isPackagedBuild && !self.agentsConnected()
+            self.consumePendingInvite()
 
             if self.isPackagedBuild && !self.agentsConnected() {
                 self.openPanel(self.inApplicationsFolder ? .connect : .moveApp)
             } else if self.identity == nil {
                 self.openPanel(.welcome)
+            } else if let code = self.pendingJoinCode {
+                self.join(code: code, openPanelFirst: true)
             }
             self.refresh()
         }
@@ -131,7 +134,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
             top = w.frame.minY - 6
         }
         let x = min(max(anchorX - size.width / 2, screen.minX + 8), screen.maxX - size.width - 8)
-        panel.setFrame(NSRect(x: x, y: top - size.height, width: size.width, height: size.height), display: true)
+        let frame = NSRect(x: x, y: top - size.height, width: size.width, height: size.height)
+        guard frame != panel.frame else { return }
+        // 已經在畫面上時，高度變化用短動畫，內容增減才不會跳一下
+        if panel.isVisible && panel.alphaValue == 1 && abs(frame.width - panel.frame.width) < 1 {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.14
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().setFrame(frame, display: true)
+            }
+        } else {
+            panel.setFrame(frame, display: true)
+        }
     }
 
     /// 使用者打開面板：可以打字、點外面會收起
@@ -143,10 +157,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         model.stack = stack
         model.screen = screen
         prepare(screen)
+        let wasVisible = panel.isVisible
         layoutPanel()
         NSApp.activate(ignoringOtherApps: true)
-        panel.alphaValue = 1
-        panel.makeKeyAndOrderFront(nil)
+        if wasVisible {
+            panel.alphaValue = 1
+            panel.makeKeyAndOrderFront(nil)
+        } else {
+            panel.alphaValue = 0
+            panel.makeKeyAndOrderFront(nil)
+            NSAnimationContext.runAnimationGroup { $0.duration = 0.12; panel.animator().alphaValue = 1 }
+        }
     }
 
     /// Agent 工作時自動跳出：不搶鍵盤焦點，使用者可以繼續在終端機打字
@@ -182,8 +203,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         case .group(let id): loadGroup(id)
         case .settings: model.nickname = identity?.name ?? ""
         case .home: refresh()
-        case .ask:
-            applyTemplate(AskTemplate.all[0])
+        case .welcome:
+            // 預先填入 Mac 的使用者名稱，多數人按一下「開始」就好
+            if model.nickname.isEmpty {
+                let full = NSFullUserName().trimmingCharacters(in: .whitespaces)
+                model.nickname = String((full.isEmpty ? NSUserName() : full).prefix(24))
+            }
+        case .join: model.joinCode = ""
+        case .question: model.confirmWithdraw = false
         default: break
         }
     }
@@ -260,6 +287,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
 
     func quit() { NSApp.terminate(nil) }
 
+    /// 出題：首頁或群組頁都可以進來。只有一個群組時自動選它，否則預設上次用的群組
+    func startAsk(groupId: Int?) {
+        let groups = model.groups
+        guard !groups.isEmpty else { go(.createGroup); return }
+        let preferred = groupId ?? state.lastGroupId
+        model.askGroupId = groups.contains { $0.id == preferred } ? preferred : groups[0].id
+        model.askShowSettings = false
+        applyTemplate(AskTemplate.all[0])
+        go(.ask)
+    }
+
     // MARK: - 本機伺服器
 
     // 伺服器設在本機（127.0.0.1／localhost）卻連不上時，用 App 內附的後端自己啟動一個。
@@ -312,14 +350,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
                 Store.save(self.identity, to: "identity.json")
                 self.api.token = c.token
                 Store.log("nickname_set")
-                if let code = self.pendingJoinCode {
-                    self.model.joinCode = code
-                    self.model.stack = [.home]
-                    self.model.screen = .join
-                    self.joinGroup()
-                } else {
-                    self.go(.home)
-                }
+                self.model.me = Me(user: c.user, groups: [])
+                self.go(.home)
+                if let code = self.pendingJoinCode { self.join(code: code, openPanelFirst: false) }
             case .failure(.message(let m)):
                 self.model.error = m
             }
@@ -374,12 +407,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     }
 
     func loadGroup(_ id: Int) {
+        scheduleNoticeClear()
         api.call("GET", "/api/groups/\(id)", as: GroupDetail.self) { [weak self] r in
             switch r {
             case .success(let d): self?.model.details[id] = d
             case .failure(.message(let m)): self?.model.error = m
             }
         }
+    }
+
+    // 成功訊息顯示幾秒後自己消失
+    var noticeTimer: DispatchWorkItem?
+    func scheduleNoticeClear() {
+        noticeTimer?.cancel()
+        guard model.notice != nil else { return }
+        let work = DispatchWorkItem { [weak self] in self?.model.notice = nil }
+        noticeTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
     }
 
     // MARK: - 群組
@@ -406,9 +450,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     }
 
     func joinGroup() {
-        let code = model.joinCode.trimmingCharacters(in: .whitespaces).uppercased()
-        guard code.count >= 8, !model.busy else { return }
+        guard let code = extractInviteCode(model.joinCode) else {
+            model.error = "找不到邀請碼。請貼上朋友傳來的邀請訊息，或輸入 8 碼邀請碼。"
+            return
+        }
+        join(code: code, openPanelFirst: false)
+    }
+
+    /// 「貼上邀請」：按下才讀取剪貼簿，整段邀請訊息或連結都可以
+    func pasteInvite() {
+        guard let text = NSPasteboard.general.string(forType: .string), let code = extractInviteCode(text) else {
+            model.error = "剪貼簿裡沒有邀請碼。請先複製朋友傳來的邀請訊息。"
+            return
+        }
+        model.joinCode = code
+        join(code: code, openPanelFirst: false)
+    }
+
+    func join(code: String, openPanelFirst: Bool) {
+        guard !model.busy else { return }
+        pendingJoinCode = nil
+        if openPanelFirst { openPanel(.join, stack: [.home]); model.joinCode = code }
         model.busy = true
+        model.error = nil
         api.call("POST", "/api/invites/\(code)/join", as: GroupDetail.self) { [weak self] r in
             guard let self = self else { return }
             self.model.busy = false
@@ -418,11 +482,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
                 self.model.joinCode = ""
                 Store.log("joined_group")
                 self.refresh()
+                self.model.stack = [.home]
                 self.replace(with: .group(d.group.id))
+                self.model.notice = "已加入「\(d.group.name)」"
+                // 一進來就有事可做：直接打開第一道還沒回答的題目
+                if let first = d.questions.last(where: { !$0.closed && !$0.answered }) {
+                    self.model.stack = [.home, .group(d.group.id)]
+                    self.showQuestion(first, remaining: d.questions.filter { !$0.closed && !$0.answered }.count - 1)
+                    self.model.screen = .question
+                    self.model.notice = "已加入「\(d.group.name)」，先答一題吧"
+                }
             case .failure(.message(let m)):
                 self.model.error = m
             }
         }
+    }
+
+    // setup.sh <邀請碼> 會把邀請碼寫在這個檔案，App 啟動時讀取一次
+    func consumePendingInvite() {
+        let url = dataDir.appendingPathComponent("pending_join")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        try? FileManager.default.removeItem(at: url)
+        if let code = extractInviteCode(text) { pendingJoinCode = code }
     }
 
     func toggleMute(groupId: Int) {
@@ -435,8 +516,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     }
 
     func copyInvite(_ g: Group) {
-        var text = "來 WhileAI 一起玩「\(g.name)」！\n邀請碼：\(g.inviteCode)\n加入連結：\(g.inviteUrl)"
-        if let install = Store.installURL { text += "\n還沒安裝 WhileAI：\(install)" }
+        var text = "來 WhileAI 一起玩「\(g.name)」！等 Agent 的空檔互相出題。\n\n邀請碼：\(g.inviteCode)\n已經有 WhileAI：點選單列的 ⏳ →「加入」→「貼上邀請」"
+        if let install = Store.installURL, let repo = URL(string: install) {
+            // 安裝指令直接帶邀請碼，裝完就自動加入
+            text += "\n還沒安裝（在終端機貼上這一行）：\ngit clone \(install).git && cd \(repo.lastPathComponent) && ./setup.sh \(g.inviteCode)"
+        }
+        text += "\n不裝 App 也能用網頁回答：\(g.inviteUrl)"
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         model.copiedGroup = g.id
@@ -446,21 +531,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         }
     }
 
+    /// 換群組時，依新群組的人數重新套用匿名／具名的預設
+    func selectAskGroup(_ id: Int) {
+        model.askGroupId = id
+        if (model.askGroup?.memberCount ?? 3) < 3 {
+            model.askAnonymous = false
+            model.askLive = true
+        }
+    }
+
     func applyTemplate(_ t: AskTemplate) {
         model.askTemplate = t.id
         model.askKind = t.kind
         model.askText = t.text
         model.askOptions = t.options.isEmpty ? ["", ""] : t.options
-        model.askAnonymous = t.anonymous
-        model.askLive = t.live
+        // 群組不到 3 人時，匿名題永遠不會開獎，所以預設改成具名
+        let small = (model.askGroup?.memberCount ?? 3) < 3
+        model.askAnonymous = small ? false : t.anonymous
+        model.askLive = small ? true : t.live
         model.askHours = t.hours
         model.askLow = t.low
         model.askHigh = t.high
         model.error = nil
     }
 
-    func askQuestion(groupId: Int) {
-        guard !model.busy else { return }
+    func askQuestion() {
+        guard !model.busy, let groupId = model.askGroupId else { return }
         var body: [String: Any] = ["text": model.askText, "kind": model.askKind, "anonymous": model.askAnonymous,
                                    "live": model.askLive, "hours": model.askHours]
         if model.askKind == "choice" || model.askKind == "multi" {
@@ -471,16 +567,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
                               "high": model.askHigh.trimmingCharacters(in: .whitespaces)]
         }
         model.busy = true
+        model.error = nil
         Store.log("ask_submitted", extra: ["kind": model.askKind, "template": model.askTemplate,
                                            "anonymous": model.askAnonymous, "live": model.askLive])
-        api.call("POST", "/api/groups/\(groupId)/questions", body: body,
-                 as: Question.self) { [weak self] r in
+        api.call("POST", "/api/groups/\(groupId)/questions", body: body, as: Question.self) { [weak self] r in
             guard let self = self else { return }
             self.model.busy = false
             switch r {
-            case .success:
+            case .success(let q):
                 Store.log("asked")
-                self.back()
+                self.state.lastGroupId = groupId
+                Store.save(self.state, to: "state.json")
+                self.refresh()
+                // 發完回到群組頁，看得到剛出的題目
+                self.model.stack = [.home]
+                self.replace(with: .group(groupId))
+                let others = max(q.memberCount - 1, 0)
+                self.model.notice = others > 0 ? "已發出。\(others) 位成員會在等 Agent 時看到。"
+                                               : "已發出。邀請朋友加入後，他們就會看到。"
             case .failure(.message(let m)):
                 self.model.error = m
             }
@@ -490,11 +594,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     // MARK: - 題目
 
     func openQuestion(_ q: Question) {
+        showQuestion(q, remaining: model.feed.pending.filter { $0.id != q.id }.count)
+        go(.question)
+    }
+
+    /// 把題目放進面板（不改變目前是哪個畫面）
+    func showQuestion(_ q: Question, remaining: Int) {
         model.multiSelection = []
         model.answerText = ""
+        model.confirmWithdraw = false
         model.question = q
+        model.remaining = max(remaining, 0)
         markSeenIfClosed(q)
-        go(.question)
+    }
+
+    /// 答完後想繼續：直接換成下一道待答題（自動卡片和手動打開的畫面都適用）
+    func showNextPending() {
+        let current = model.question?.id
+        guard let next = model.feed.pending.first(where: { $0.id != current }) else { return }
+        pendingHide?.cancel()
+        showQuestion(next, remaining: model.feed.pending.filter { $0.id != next.id && $0.id != current }.count)
+        Store.log("next_question", question: next.id, extra: ["auto": isAutoCard])
+    }
+
+    func closeEarly() {
+        guard let q = model.question, q.isMine, !model.busy else { return }
+        model.busy = true
+        api.call("POST", "/api/questions/\(q.id)/close", as: Question.self) { [weak self] r in
+            guard let self = self else { return }
+            self.model.busy = false
+            switch r {
+            case .success(let updated):
+                self.model.question = updated
+                self.markSeenIfClosed(updated)
+                self.loadGroup(q.groupId)
+                self.refresh()
+                Store.log("closed_early", question: q.id)
+            case .failure(.message(let m)):
+                self.model.error = m
+            }
+        }
+    }
+
+    func withdraw() {
+        guard let q = model.question, q.isMine, !model.busy else { return }
+        // 第一下只是確認，第二下才真的撤回
+        guard model.confirmWithdraw else { model.confirmWithdraw = true; return }
+        model.busy = true
+        struct OK: Codable { let ok: Bool }
+        api.call("DELETE", "/api/questions/\(q.id)", as: OK.self) { [weak self] r in
+            guard let self = self else { return }
+            self.model.busy = false
+            switch r {
+            case .success:
+                Store.log("withdrawn", question: q.id)
+                self.refresh()
+                self.back()
+                self.model.notice = "已撤回題目"
+            case .failure(.message(let m)):
+                self.model.error = m
+            }
+        }
     }
 
     func markSeenIfClosed(_ q: Question) {
@@ -517,11 +677,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
                 self.markSeenIfClosed(updated)   // 我是最後一個回答的人 → 直接看到開獎
                 self.model.feed = Feed(pending: self.model.feed.pending.filter { $0.id != q.id },
                                        results: self.model.feed.results)
+                self.model.remaining = self.model.feed.pending.count
                 self.updateBadge()
                 self.loadGroup(q.groupId)
                 // 只記錄題型與是否來自自動卡片，不記錄回答內容
                 Store.log("voted", question: q.id, extra: ["kind": q.qKind, "auto": self.isAutoCard])
-                if self.isAutoCard && self.model.phase == .done { self.scheduleHide(after: 5) }
+                if self.isAutoCard {
+                    if self.model.phase == .done {
+                        self.scheduleHide(after: 5)
+                    } else if !updated.hasResults && self.model.remaining == 0 {
+                        self.scheduleHide(after: 2)   // 沒有結果可看、也沒有下一題：不佔著畫面
+                    }
+                }
             case .failure(.message(let m)):
                 self.model.error = m
             }
@@ -648,14 +815,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     func showAutoQuestion(_ q: Question) {
         pendingHide?.cancel()
         model.onboarding = false
-        model.multiSelection = []
-        model.answerText = ""
-        model.question = q
+        showQuestion(q, remaining: model.feed.pending.filter { $0.id != q.id }.count)
         model.phase = .working
         lastShown = Date()
-        if q.closed {
-            markSeenIfClosed(q)
-        } else {
+        if !q.closed {
             var shown = state.shownByDay[today] ?? []
             if !shown.contains(q.id) { shown.append(q.id) }
             state.shownByDay = [today: shown]   // 只保留今天
@@ -687,9 +850,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
             pendingJoinCode = code
             openPanel(.welcome)
         } else {
-            model.joinCode = code
-            openPanel(.join, stack: [.home])
-            joinGroup()
+            join(code: code, openPanelFirst: true)
         }
     }
 
