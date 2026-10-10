@@ -29,12 +29,17 @@ MIN_REVEAL = 3            # 至少幾人回答才公開結果
 DEFAULT_HOURS = 24
 HANDOFF_TTL = 120         # App → 網頁 的一次性登入碼有效秒數
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-MAX_BODY = 16 * 1024      # 請求內容上限（bytes）
+MAX_BODY = 64 * 1024      # 請求內容上限（bytes）；畫圖題的筆畫資料最大約 40KB
 TRUST_PROXY = os.environ.get("TRUST_PROXY") == "1" or bool(os.environ.get("RAILWAY_ENVIRONMENT_NAME"))
 
-KINDS = ("choice", "multi", "scale", "text")
+KINDS = ("choice", "multi", "scale", "text", "draw")
 MAX_OPTIONS = 6
 MAX_TEXT_ANSWER = 140
+# 畫圖題：回答是一組筆畫。座標是 0–1000 的整數（畫布寬 1000、高 700），不存圖片
+DRAW_COLORS = 6
+DRAW_WIDTHS = (1, 2)
+MAX_STROKES = 300
+MAX_DRAW_POINTS = 4000
 
 # 新群組的起手題：(問題, 題型, 選項, 評分兩端的說明)
 STARTER_QUESTIONS = [
@@ -117,6 +122,26 @@ def clean_text(value, field, lo, hi):
     if not lo <= len(value) <= hi:
         raise ApiError(400, f"{field} 長度需介於 {lo}–{hi} 字")
     return value
+
+
+def clean_drawing(answer):
+    """檢查畫圖題的回答：[{c: 顏色編號, w: 粗細, p: [x1, y1, x2, y2, ...]}, ...]"""
+    if not isinstance(answer, list) or not 1 <= len(answer) <= MAX_STROKES:
+        raise ApiError(400, "請先畫點東西")
+    strokes, total = [], 0
+    for st in answer:
+        if not isinstance(st, dict):
+            raise ApiError(400, "畫作格式錯誤")
+        c, w, p = st.get("c"), st.get("w"), st.get("p")
+        if type(c) is not int or not 0 <= c < DRAW_COLORS or type(w) is not int or w not in DRAW_WIDTHS:
+            raise ApiError(400, "畫作格式錯誤")
+        if not isinstance(p, list) or len(p) < 2 or len(p) % 2 or any(type(v) is not int or not 0 <= v <= 1000 for v in p):
+            raise ApiError(400, "畫作格式錯誤")
+        total += len(p) // 2
+        strokes.append({"c": c, "w": w, "p": p})
+    if total > MAX_DRAW_POINTS:
+        raise ApiError(400, "畫得太複雜了，請簡化一點再送出")
+    return strokes
 
 
 class Store:
@@ -263,7 +288,7 @@ class Store:
     def insert_question(self, gid, author_id, text, kind, options, config, anonymous, live, t, hours):
         if kind == "scale":
             options = ["1", "2", "3", "4", "5"]
-        elif kind == "text":
+        elif kind in ("text", "draw"):
             options = []
         cur = self.db.execute(
             "INSERT INTO questions (group_id, author_id, text, options, created_at, closes_at, kind, anonymous, live, config) "
@@ -320,13 +345,15 @@ class Store:
                     or any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(options) for i in answer)):
                 raise ApiError(400, "請至少選一個選項")
             answer = sorted(answer)
+        elif kind == "draw":
+            answer = clean_drawing(answer)
         else:
             answer = clean_text(answer, "回答", 1, MAX_TEXT_ANSWER)
         try:
             self.db.execute(
                 "INSERT INTO votes (question_id, user_id, option_index, created_at, answer) VALUES (?, ?, ?, ?, ?)",
                 (qid, user["id"], answer if isinstance(answer, int) else 0, now(),
-                 json.dumps(answer, ensure_ascii=False)))
+                 json.dumps(answer, ensure_ascii=False, separators=(",", ":"))))
         except sqlite3.IntegrityError:
             raise ApiError(409, "你已經回答過這題")
         # 全員答完 → 提早開獎。群組不到 MIN_REVEAL 人時不提早，避免剛建群就把題目關掉
@@ -401,6 +428,7 @@ class Store:
             "results": None,      # 各選項票數（單選／多選／評分）
             "voters": None,       # 具名題：各選項的回答者暱稱
             "texts": None,        # 文字題：回答列表
+            "drawings": None,     # 畫圖題：每個人的筆畫
             "hidden_reason": None,
         }
         # 什麼時候看得到結果：截止後；或「即時」題在自己回答之後（出題者隨時可看）
@@ -419,6 +447,13 @@ class Store:
             if anonymous:   # 不依回答時間排序，避免從順序猜出是誰
                 texts.sort(key=lambda t: hashlib.sha256(f"{qid}:{t['text']}".encode()).hexdigest())
             view["texts"] = texts
+            return view
+        if kind == "draw":
+            drawings = [{"strokes": self.decode_answer(r), "name": None if anonymous else r["name"]} for r in rows]
+            if anonymous:   # 不依回答時間排序，避免從順序猜出是誰
+                drawings.sort(key=lambda d: hashlib.sha256(
+                    f"{qid}:{json.dumps(d['strokes'], separators=(',', ':'))}".encode()).hexdigest())
+            view["drawings"] = drawings
             return view
         counts = [0] * len(options)
         voters = [[] for _ in options]

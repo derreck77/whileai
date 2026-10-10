@@ -40,12 +40,13 @@ struct Question: Codable, Equatable, Identifiable {
     var myText: String? = nil         // 文字題
     var voters: [[String]]? = nil     // 具名題：各選項的回答者
     var texts: [TextAnswer]? = nil    // 文字題的回答
+    var drawings: [Drawing]? = nil    // 畫圖題的回答
 
     var qKind: String { kind ?? "choice" }
     var isAnonymous: Bool { anonymous ?? true }
     var isLive: Bool { live ?? false }
     var answered: Bool { myAnswered ?? (myVote != nil) }
-    var hasResults: Bool { results != nil || texts != nil }
+    var hasResults: Bool { results != nil || texts != nil || drawings != nil }
 
     func isMyChoice(_ i: Int) -> Bool { myVote == i || (myVotes?.contains(i) ?? false) }
 
@@ -54,6 +55,7 @@ struct Question: Codable, Equatable, Identifiable {
         case "multi": return "checklist"
         case "scale": return "gauge.with.dots.needle.33percent"
         case "text": return "text.bubble"
+        case "draw": return "scribble.variable"
         default: return "circle.inset.filled"
         }
     }
@@ -63,6 +65,7 @@ struct Question: Codable, Equatable, Identifiable {
         case "multi": return "多選"
         case "scale": return "評分"
         case "text": return "文字"
+        case "draw": return "畫圖"
         default: return "單選"
         }
     }
@@ -85,6 +88,24 @@ func extractInviteCode(_ raw: String) -> String? {
 
 struct TextAnswer: Codable, Equatable {
     let text: String
+    let name: String?
+}
+
+/// 畫圖題的一筆：c = 顏色編號、w = 粗細（1 細、2 粗）、p = [x1, y1, x2, y2, ...]
+/// 座標是 0–1000 的整數，畫布寬 1000、高 700。存筆畫而不是圖片，資料小、放大也不會糊。
+struct Stroke: Codable, Equatable {
+    var c: Int
+    var w: Int
+    var p: [Int]
+
+    static let canvasSize = CGSize(width: 1000, height: 700)
+    static let maxPoints = 3500        // 後端上限是 4000，留一點餘裕
+
+    var json: [String: Any] { ["c": c, "w": w, "p": p] }
+}
+
+struct Drawing: Codable, Equatable {
+    let strokes: [Stroke]
     let name: String?
 }
 
@@ -118,6 +139,8 @@ struct AskTemplate: Identifiable, Equatable {
         AskTemplate(id: "mood", label: "🌡 心情", kind: "scale", text: "這週工作順不順？", options: [],
                     anonymous: true, live: false, hours: 24, low: "很卡", high: "很順"),
         AskTemplate(id: "rant", label: "🤐 匿名吐槽", kind: "text", text: "Agent 今天做過最蠢的事？", options: [],
+                    anonymous: true, live: false, hours: 24),
+        AskTemplate(id: "draw", label: "🎨 畫圖", kind: "draw", text: "用畫的：你現在的心情", options: [],
                     anonymous: true, live: false, hours: 24),
     ]
 }

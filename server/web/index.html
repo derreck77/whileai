@@ -58,6 +58,15 @@
              border-radius: 10px; padding: 9px 12px; width: 100%; resize: vertical; min-height: 64px; margin-top: 8px; }
   .named { color: #d9822b; } .voters { font-size: 12px; color: var(--muted); margin: -4px 0 8px; }
   .answer { background: var(--bg); border-radius: 10px; padding: 8px 12px; margin-top: 6px; }
+  canvas.pad, canvas.dv { width: 100%; aspect-ratio: 10 / 7; background: #fff; border-radius: 10px;
+                          border: 1px solid var(--line); display: block; }
+  canvas.pad { touch-action: none; cursor: crosshair; margin-top: 8px; }
+  .gallery { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .gallery.one { grid-template-columns: 1fr; }
+  .tools { display: flex; gap: 6px; align-items: center; margin: 8px 0; }
+  .dot { width: 22px; height: 22px; border-radius: 50%; padding: 0; border: 2px solid var(--line); }
+  .dot.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .tools .ghost.on { background: var(--accent-soft); }
   .error { color: #d64545; font-size: 13px; min-height: 1em; margin-top: 6px; }
   .tabs { display: flex; gap: 4px; margin: 20px 0 4px; }
   .tabs button { background: transparent; color: var(--muted); padding: 6px 12px; }
@@ -217,6 +226,74 @@ async function renderJoin(code) {
   };
 }
 
+// ---------- 畫圖題 ----------
+// 筆畫格式：{c: 顏色編號, w: 粗細(1|2), p: [x1, y1, x2, y2, ...]}，座標 0–1000，畫布 1000×700
+const COLORS = ['#1c1c1f', '#e63836', '#2178f2', '#2ea85c', '#fa9917', '#9457db'];
+const MAX_POINTS = 3500;
+let DV = [];          // 這次畫面要顯示的作品
+const PADS = {};      // 各題作畫中的狀態
+
+function paint(canvas, strokes) {
+  const ctx = canvas.getContext('2d');
+  const sx = canvas.width / 1000, sy = canvas.height / 700;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const s of strokes) {
+    const pts = [];
+    for (let i = 0; i + 1 < s.p.length; i += 2) pts.push([s.p[i] * sx, s.p[i + 1] * sy]);
+    if (!pts.length) continue;
+    ctx.strokeStyle = COLORS[s.c] || COLORS[0];
+    ctx.lineWidth = (s.w === 2 ? 0.024 : 0.009) * canvas.width;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    if (pts.length === 1) ctx.lineTo(pts[0][0], pts[0][1]);
+    for (let k = 1; k < pts.length; k++) {
+      ctx.quadraticCurveTo(pts[k - 1][0], pts[k - 1][1], (pts[k - 1][0] + pts[k][0]) / 2, (pts[k - 1][1] + pts[k][1]) / 2);
+    }
+    if (pts.length > 1) ctx.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    ctx.stroke();
+  }
+}
+
+function setupPad(canvas, send) {
+  const qid = +canvas.dataset.pad;
+  const st = PADS[qid] = PADS[qid] || { strokes: [], color: 0, w: 1 };
+  const box = canvas.closest('.card');
+  const count = () => st.strokes.reduce((a, s) => a + s.p.length / 2, 0);
+  const sync = () => {
+    paint(canvas, st.strokes);
+    box.querySelectorAll('[data-color]').forEach(b => b.classList.toggle('on', +b.dataset.color === st.color));
+    box.querySelectorAll('[data-width]').forEach(b => b.classList.toggle('on', +b.dataset.width === st.w));
+    box.querySelector('[data-draw]').disabled = !st.strokes.length;
+  };
+  const at = e => {
+    const r = canvas.getBoundingClientRect();
+    return [Math.round(Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1) * 1000),
+            Math.round(Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1) * 700)];
+  };
+  let cur = null;
+  canvas.onpointerdown = e => {
+    if (count() >= MAX_POINTS) return;
+    canvas.setPointerCapture(e.pointerId);
+    cur = { c: st.color, w: st.w, p: at(e) };
+    st.strokes.push(cur); sync();
+  };
+  canvas.onpointermove = e => {
+    if (!cur || count() >= MAX_POINTS) return;
+    const [x, y] = at(e), n = cur.p.length;
+    const dx = x - cur.p[n - 2], dy = y - cur.p[n - 1];
+    if (dx * dx + dy * dy < 16) return;       // 移動太短就不記，減少資料量
+    cur.p.push(x, y); paint(canvas, st.strokes);
+  };
+  canvas.onpointerup = canvas.onpointercancel = () => { cur = null; };
+  box.querySelectorAll('[data-color]').forEach(b => b.onclick = () => { st.color = +b.dataset.color; sync(); });
+  box.querySelectorAll('[data-width]').forEach(b => b.onclick = () => { st.w = +b.dataset.width; sync(); });
+  box.querySelector('[data-undo]').onclick = () => { st.strokes.pop(); sync(); };
+  box.querySelector('[data-clear]').onclick = () => { st.strokes = []; sync(); };
+  box.querySelector('[data-draw]').onclick = () => { if (st.strokes.length) { send(qid, st.strokes); delete PADS[qid]; } };
+  sync();
+}
+
 // ---------- 群組頁 ----------
 let tab = 'open';
 
@@ -228,6 +305,7 @@ async function renderGroup(gid) {
   const open = questions.filter(q => !q.closed);
   const closed = questions.filter(q => q.closed);
   const list = tab === 'open' ? open : closed;
+  DV = [];
 
   $app.innerHTML = `${topBar()}
     <h1>${esc(g.name)}</h1>
@@ -245,7 +323,8 @@ async function renderGroup(gid) {
       <div class="row" style="flex-wrap:nowrap;margin-bottom:10px">
         <select id="kind" style="width:auto">
           <option value="choice">單選</option><option value="multi">多選</option>
-          <option value="scale">評分 1–5</option><option value="text">文字回答</option></select>
+          <option value="scale">評分 1–5</option><option value="text">文字回答</option>
+          <option value="draw">畫圖</option></select>
         <input id="qtext" maxlength="120" placeholder="想問大家什麼？例如：中午吃什麼？">
       </div>
       <div class="opts-edit" id="opts"></div>
@@ -325,6 +404,8 @@ async function renderGroup(gid) {
     const picked = [...document.querySelectorAll(`[data-pick="${qid}"]:checked`)].map(c => +c.value);
     if (picked.length) send(qid, picked); else alert('請至少選一個選項');
   });
+  document.querySelectorAll('canvas[data-dv]').forEach(c => paint(c, DV[+c.dataset.dv]));
+  document.querySelectorAll('canvas[data-pad]').forEach(c => setupPad(c, send));
   document.querySelectorAll('[data-text]').forEach(b => b.onclick = () => {
     const qid = +b.dataset.text;
     const v = document.getElementById('text-' + qid).value.trim();
@@ -341,7 +422,12 @@ function questionCard(q) {
   const scaleLabels = (q.scale_low || q.scale_high)
     ? `<div class="row faint" style="justify-content:space-between"><span>${q.scale_low ? '1 = ' + esc(q.scale_low) : ''}</span><span>${q.scale_high ? '5 = ' + esc(q.scale_high) : ''}</span></div>` : '';
   let body;
-  if (q.texts) {
+  if (q.drawings) {
+    body = `<div class="gallery ${q.drawings.length === 1 ? 'one' : ''}">` + q.drawings.map(d => {
+      DV.push(d.strokes);
+      return `<div><canvas class="dv" width="600" height="420" data-dv="${DV.length - 1}"></canvas>${d.name ? `<div class="faint">${esc(d.name)}</div>` : ''}</div>`;
+    }).join('') + '</div>';
+  } else if (q.texts) {
     body = q.texts.map(t => `<div class="answer">${esc(t.text)}${t.name ? `<div class="faint">${esc(t.name)}</div>` : ''}</div>`).join('');
   } else if (q.results) {
     const votes = q.results.reduce((a, b) => a + b, 0);
@@ -370,6 +456,13 @@ function questionCard(q) {
   } else if (kind === 'scale') {
     body = `<div class="scale">${[0, 1, 2, 3, 4].map(i => `<button class="opt" data-vote="${q.id}:${i}">${i + 1}</button>`).join('')}</div>`
       + scaleLabels + privacy;
+  } else if (kind === 'draw') {
+    body = `<canvas class="pad" width="1000" height="700" data-pad="${q.id}"></canvas>
+      <div class="tools">${COLORS.map((c, i) => `<button class="dot" data-color="${i}" style="background:${c}" aria-label="顏色 ${i + 1}"></button>`).join('')}
+        <span style="flex:1"></span>
+        <button class="ghost" data-width="1">細</button><button class="ghost" data-width="2">粗</button>
+        <button class="ghost" data-undo>復原</button><button class="ghost" data-clear>清除</button></div>
+      <button data-draw="${q.id}">送出這張畫</button>` + privacy;
   } else if (kind === 'text') {
     body = `<textarea id="text-${q.id}" maxlength="140" placeholder="寫下你的回答（最多 140 字）"></textarea>
       <button style="margin-top:8px" data-text="${q.id}">送出</button>` + privacy;

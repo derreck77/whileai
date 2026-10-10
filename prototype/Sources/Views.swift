@@ -88,9 +88,14 @@ final class Model: ObservableObject {
     @Published var askHigh = ""
     @Published var askShowSettings = false
 
-    // 回答多選題、文字題時的暫存
+    // 回答多選題、文字題、畫圖題時的暫存
     @Published var multiSelection = Set<Int>()
     @Published var answerText = ""
+    @Published var strokes: [Stroke] = []
+    @Published var penColor = 0
+    @Published var penWidth = 1
+    var strokeOpen = false                     // 目前有一筆正在畫（滑鼠還沒放開）
+    var pointCount: Int { strokes.reduce(0) { $0 + $1.p.count / 2 } }
 
     var groups: [Group] { me?.groups ?? [] }
     var askGroup: Group? { groups.first { $0.id == askGroupId } }
@@ -863,6 +868,8 @@ struct AskView: View {
                     Field(placeholder: "1 分代表…", text: $m.askLow, preview: m.preview)
                     Field(placeholder: "5 分代表…", text: $m.askHigh, preview: m.preview)
                 }
+            } else if m.askKind == "draw" {
+                Hint(text: "成員用滑鼠在小畫布上畫圖回答，開獎時會看到所有人的畫。")
             } else {
                 Hint(text: "成員用一句話回答，最多 140 字。")
             }
@@ -901,7 +908,7 @@ struct AskView: View {
 
             if m.askShowSettings {
                 VStack(spacing: 6) {
-                    Segmented(items: [("choice", "單選"), ("multi", "多選"), ("scale", "評分"), ("text", "文字")],
+                    Segmented(items: [("choice", "單選"), ("multi", "多選"), ("scale", "評分"), ("text", "文字"), ("draw", "畫圖")],
                               selection: $m.askKind)
                     Segmented(items: [(true, "匿名"), (false, "具名")], selection: $m.askAnonymous)
                     Segmented(items: [(false, "截止才開獎"), (true, "回答後立刻看結果")], selection: $m.askLive)
@@ -915,7 +922,7 @@ struct AskView: View {
     }
 
     var kindLabel: String {
-        ["choice": "單選", "multi": "多選", "scale": "評分", "text": "文字"][m.askKind] ?? "單選"
+        ["choice": "單選", "multi": "多選", "scale": "評分", "text": "文字", "draw": "畫圖"][m.askKind] ?? "單選"
     }
 
     var deadlineLabel: String {
@@ -1048,6 +1055,8 @@ struct QuestionView: View {
                 .disabled(m.busy)
                 ScaleLabels(q: q)
             }
+        case "draw":
+            DrawingPad(m: m)
         case "text":
             VStack(alignment: .trailing, spacing: 6) {
                 Field(placeholder: "寫下你的回答…", text: $m.answerText, multiline: true, preview: m.preview)
@@ -1147,7 +1156,9 @@ struct ResultsView: View {
     @State private var shown = false     // 長條從 0 長出來
 
     var body: some View {
-        if let texts = q.texts {
+        if let drawings = q.drawings {
+            DrawingGallery(drawings: drawings)
+        } else if let texts = q.texts {
             CappedList(count: texts.count, rowHeight: 46, maxHeight: 216) {
                 ForEach(texts.indices, id: \.self) { i in
                     HStack(alignment: .top, spacing: 8) {
@@ -1212,6 +1223,193 @@ struct ResultsView: View {
                 }
             }
             .onAppear { withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) { shown = true } }
+        }
+    }
+}
+
+// MARK: - 畫圖題
+
+enum Palette {
+    /// 畫布固定是白底，所以用固定的顏色，不跟著深色模式變
+    static let colors: [Color] = [
+        Color(red: 0.11, green: 0.11, blue: 0.12),   // 墨黑
+        Color(red: 0.90, green: 0.22, blue: 0.21),   // 紅
+        Color(red: 0.13, green: 0.47, blue: 0.95),   // 藍
+        Color(red: 0.18, green: 0.66, blue: 0.36),   // 綠
+        Color(red: 0.98, green: 0.60, blue: 0.09),   // 橘
+        Color(red: 0.58, green: 0.34, blue: 0.86),   // 紫
+    ]
+    static let paper = Color.white
+    static func color(_ i: Int) -> Color { colors[safe: i] ?? colors[0] }
+}
+
+/// 把筆畫畫出來（唯讀）。畫布比例固定 10:7
+struct DrawingView: View {
+    let strokes: [Stroke]
+    var corner: CGFloat = 10
+
+    var body: some View {
+        Canvas { ctx, size in
+            let sx = size.width / Stroke.canvasSize.width
+            let sy = size.height / Stroke.canvasSize.height
+            for s in strokes {
+                var pts: [CGPoint] = []
+                var i = 0
+                while i + 1 < s.p.count {
+                    pts.append(CGPoint(x: CGFloat(s.p[i]) * sx, y: CGFloat(s.p[i + 1]) * sy))
+                    i += 2
+                }
+                guard let first = pts.first else { continue }
+                var path = Path()
+                path.move(to: first)
+                if pts.count == 1 {
+                    path.addLine(to: first)     // 單點：靠圓頭線帽畫成一個點
+                } else {
+                    // 經過相鄰兩點的中點畫二次曲線，線條比直接連線圓滑
+                    for k in 1..<pts.count {
+                        let mid = CGPoint(x: (pts[k - 1].x + pts[k].x) / 2, y: (pts[k - 1].y + pts[k].y) / 2)
+                        path.addQuadCurve(to: mid, control: pts[k - 1])
+                    }
+                    path.addLine(to: pts[pts.count - 1])
+                }
+                ctx.stroke(path, with: .color(Palette.color(s.c)),
+                           style: StrokeStyle(lineWidth: (s.w == 2 ? 0.024 : 0.009) * size.width,
+                                              lineCap: .round, lineJoin: .round))
+            }
+        }
+        .aspectRatio(Stroke.canvasSize.width / Stroke.canvasSize.height, contentMode: .fit)
+        .background(Palette.paper)
+        .clipShape(RoundedRectangle(cornerRadius: corner))
+        .overlay(RoundedRectangle(cornerRadius: corner).stroke(Color.primary.opacity(0.12)))
+    }
+}
+
+/// 作畫區：畫布＋工具列（顏色、粗細、復原、清除）＋送出
+struct DrawingPad: View {
+    @ObservedObject var m: Model
+
+    var full: Bool { m.pointCount >= Stroke.maxPoints }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            GeometryReader { geo in
+                DrawingView(strokes: m.strokes)
+                    .overlay(alignment: .center) {
+                        if m.strokes.isEmpty {
+                            VStack(spacing: 4) {
+                                Image(systemName: "scribble.variable").font(.system(size: 20))
+                                Text("在這裡按住滑鼠畫圖").font(.system(size: 11.5))
+                            }
+                            .foregroundStyle(Color.black.opacity(0.28))
+                            .fixedSize()
+                            .allowsHitTesting(false)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                        .onChanged { v in add(v.location, in: geo.size) }
+                        .onEnded { _ in m.strokeOpen = false })
+                    .onHover { inside in if inside { NSCursor.crosshair.push() } else { NSCursor.pop() } }
+            }
+            .aspectRatio(Stroke.canvasSize.width / Stroke.canvasSize.height, contentMode: .fit)
+
+            HStack(spacing: 6) {
+                ForEach(Palette.colors.indices, id: \.self) { i in
+                    Button(action: { m.penColor = i }) {
+                        Circle()
+                            .fill(Palette.colors[i])
+                            .frame(width: 16, height: 16)
+                            .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.5).padding(1))
+                            .overlay(Circle().stroke(m.penColor == i ? Color.accentColor : Color.primary.opacity(0.15),
+                                                     lineWidth: m.penColor == i ? 2 : 1))
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("顏色")
+                }
+                Spacer(minLength: 2)
+                widthButton(1)
+                widthButton(2)
+                Rectangle().fill(Theme.fill(0.12)).frame(width: 1, height: 16)
+                IconButton(symbol: "arrow.uturn.backward", help: "復原上一筆") {
+                    if !m.strokes.isEmpty { m.strokes.removeLast() }
+                    m.strokeOpen = false
+                }
+                .disabled(m.strokes.isEmpty)
+                IconButton(symbol: "trash", help: "清除重畫") { m.strokes = []; m.strokeOpen = false }
+                    .disabled(m.strokes.isEmpty)
+            }
+
+            if full {
+                Hint(text: "畫布已經畫滿了。可以復原幾筆，或直接送出。")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            PrimaryButton(title: m.strokes.isEmpty ? "畫好後送出" : "送出這張畫") {
+                m.actions?.vote(m.strokes.map { $0.json })
+            }
+            .disabled(m.strokes.isEmpty || m.busy)
+        }
+    }
+
+    func widthButton(_ w: Int) -> some View {
+        Button(action: { m.penWidth = w }) {
+            Circle()
+                .fill(Color.primary.opacity(m.penWidth == w ? 0.9 : 0.4))
+                .frame(width: w == 2 ? 11 : 5, height: w == 2 ? 11 : 5)
+                .frame(width: 24, height: 24)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.fill(m.penWidth == w ? 0.14 : 0)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(w == 2 ? "粗筆" : "細筆")
+    }
+
+    /// 滑鼠位置換算成 0–1000 的畫布座標，加進目前這一筆
+    func add(_ location: CGPoint, in size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        let x = Int((min(max(location.x / size.width, 0), 1) * Stroke.canvasSize.width).rounded())
+        let y = Int((min(max(location.y / size.height, 0), 1) * Stroke.canvasSize.height).rounded())
+        if !m.strokeOpen {
+            guard !full else { return }
+            m.strokes.append(Stroke(c: m.penColor, w: m.penWidth, p: [x, y]))
+            m.strokeOpen = true
+            return
+        }
+        guard !full, var last = m.strokes.last, last.p.count >= 2 else { return }
+        // 移動太短就不記，減少資料量
+        let dx = x - last.p[last.p.count - 2], dy = y - last.p[last.p.count - 1]
+        guard dx * dx + dy * dy >= 16 else { return }
+        last.p.append(contentsOf: [x, y])
+        m.strokes[m.strokes.count - 1] = last
+    }
+}
+
+/// 開獎：所有人的畫
+struct DrawingGallery: View {
+    let drawings: [Drawing]
+
+    var body: some View {
+        if drawings.count == 1 {
+            cell(drawings[0])
+        } else {
+            let grid = LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                ForEach(drawings.indices, id: \.self) { i in cell(drawings[i]) }
+            }
+            if drawings.count > 4 {
+                ScrollView { grid }.frame(height: 290)
+            } else {
+                grid
+            }
+        }
+    }
+
+    func cell(_ d: Drawing) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            DrawingView(strokes: d.strokes, corner: 8)
+            if let name = d.name {
+                Text(name).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
+            }
         }
     }
 }

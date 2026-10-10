@@ -602,6 +602,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     func showQuestion(_ q: Question, remaining: Int) {
         model.multiSelection = []
         model.answerText = ""
+        model.strokes = []
+        model.strokeOpen = false
         model.confirmWithdraw = false
         model.question = q
         model.remaining = max(remaining, 0)

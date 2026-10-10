@@ -123,6 +123,31 @@ if CommandLine.arguments.dropFirst().first == "snapshot" {
     }
     add("28-card-onboarding", .card, stack: []) { $0.onboarding = true }
 
+    // 畫圖題
+    let smile = [Stroke(c: 4, w: 2, p: [500, 100, 700, 160, 800, 350, 700, 540, 500, 600, 300, 540, 200, 350, 300, 160, 500, 100]),
+                 Stroke(c: 0, w: 2, p: [400, 290]), Stroke(c: 0, w: 2, p: [600, 290]),
+                 Stroke(c: 1, w: 1, p: [380, 420, 440, 480, 500, 500, 560, 480, 620, 420])]
+    let zigzag = [Stroke(c: 2, w: 1, p: [100, 500, 250, 200, 400, 500, 550, 200, 700, 500, 850, 200]),
+                  Stroke(c: 3, w: 2, p: [150, 600, 850, 600])]
+    let storm = [Stroke(c: 5, w: 2, p: [250, 300, 350, 200, 500, 180, 650, 200, 750, 300, 650, 380, 350, 380, 250, 300]),
+                 Stroke(c: 4, w: 1, p: [520, 400, 440, 520, 520, 520, 460, 640])]
+    add("30-card-draw", .card, stack: []) {
+        $0.question = q(20, "用畫的：你現在的心情", author: "美玲", kind: "draw", options: [], answered: 2)
+        $0.strokes = smile; $0.penColor = 1
+    }
+    add("31-card-draw-empty", .card, stack: []) {
+        $0.question = q(20, "畫一隻貓", author: "阿凱", kind: "draw", options: [], anonymous: false, live: true, answered: 0)
+        $0.agentName = "Claude Code"
+    }
+    add("32-card-draw-result", .card, stack: []) {
+        var d = q(21, "用畫的：你現在的心情", author: "美玲", kind: "draw", options: [], anonymous: false, answered: 3, closed: true)
+        d.myAnswered = true
+        d.drawings = [Drawing(strokes: smile, name: "derreck"), Drawing(strokes: zigzag, name: "阿凱"),
+                      Drawing(strokes: storm, name: "小林")]
+        $0.question = d; $0.phase = .done
+    }
+    add("33-ask-draw", .ask) { apply($0, AskTemplate.all[7]) }
+
     MainActor.assumeIsolated {
         for (name, m) in cases {
             let view = PanelView(m: m).padding(24)

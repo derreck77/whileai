@@ -180,6 +180,27 @@ def main():
         check(ask({"text": "隨便問問看", "kind": "essay"}).get("error") == "不支援的題型", "不支援的題型會被拒絕")
         check("error" in ask({"text": "選項太多的題目", "options": list("abcdefg")}), "選項超過 6 個會被拒絕")
 
+        print("I. 畫圖題")
+        draw = ask({"text": "畫出你現在的心情", "kind": "draw"})
+        check(draw["kind"] == "draw" and draw["options"] == [], "可以出畫圖題")
+        smile = [{"c": 0, "w": 2, "p": [300, 300, 300, 320]}, {"c": 1, "w": 1, "p": [250, 450, 400, 520, 550, 450]}]
+        bad = [("空白的畫", []), ("座標超出範圍", [{"c": 0, "w": 1, "p": [0, 1001]}]),
+               ("座標數量是奇數", [{"c": 0, "w": 1, "p": [1, 2, 3]}]), ("不存在的顏色", [{"c": 9, "w": 1, "p": [1, 2]}]),
+               ("不存在的粗細", [{"c": 0, "w": 7, "p": [1, 2]}]), ("不是筆畫", "一段文字"),
+               ("點數過多", [{"c": 0, "w": 1, "p": [1, 1] * 4001}])]
+        for label, payload in bad:
+            check(call("POST", f"/api/questions/{draw['id']}/vote", {"answer": payload}, B)[0] == 400, f"拒絕：{label}")
+        _, v = call("POST", f"/api/questions/{draw['id']}/vote", {"answer": smile}, B)
+        check(v["my_answered"] and v["drawings"] is None, "匿名畫圖題：回答後還看不到別人的畫")
+        call("POST", f"/api/questions/{draw['id']}/vote", {"answer": [{"c": 2, "w": 1, "p": [10, 10, 990, 690]}]}, C)
+        _, v = call("POST", f"/api/questions/{draw['id']}/vote", {"answer": [{"c": 3, "w": 2, "p": [500, 350]}]}, A)
+        check(v["closed"] and len(v["drawings"]) == 3 and all(d["name"] is None for d in v["drawings"]),
+              "開獎：看到 3 張畫，匿名題不含名字")
+        check(smile in [d["strokes"] for d in v["drawings"]], "筆畫資料原樣保存")
+        named = ask({"text": "畫一隻貓", "kind": "draw", "anonymous": False, "live": True})
+        _, v = call("POST", f"/api/questions/{named['id']}/vote", {"answer": smile}, B)
+        check(v["drawings"][0]["name"] == "阿凱", "具名即時畫圖題：畫完立刻看到，並顯示暱稱")
+
         print("H. 出題者：我出的題、提前開獎、撤回")
         mineq = ask({"text": "下午要不要訂飲料？", "options": ["要", "不要"], "anonymous": False, "live": True})
         _, feed = call("GET", "/api/feed", token=A)
@@ -203,8 +224,8 @@ def main():
             check(r.headers.get("X-Frame-Options") == "DENY" and "frame-ancestors 'none'" in
                   r.headers.get("Content-Security-Policy", ""), "網頁有安全標頭（CSP、禁止被嵌入）")
             check(r.headers.get("Referrer-Policy") == "no-referrer", "Referrer-Policy: no-referrer")
-        s, _ = call("POST", f"/api/groups/{gid}/questions", {"text": "x" * 20000, "options": ["a", "b"]}, A)
-        check(s == 413, "超過 16KB 的請求會被拒絕")
+        s, _ = call("POST", f"/api/groups/{gid}/questions", {"text": "x" * 70000, "options": ["a", "b"]}, A)
+        check(s == 413, "超過 64KB 的請求會被拒絕")
         codes = [call("POST", "/api/users", {"name": f"u{i}"})[0] for i in range(25)]
         check(codes.count(429) > 0 and codes[0] == 200, f"同一 IP 大量建立身分會被限制（{codes.count(429)} 次 429）")
     finally:
