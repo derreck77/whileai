@@ -41,6 +41,8 @@ struct Question: Codable, Equatable, Identifiable {
     var voters: [[String]]? = nil     // 具名題：各選項的回答者
     var texts: [TextAnswer]? = nil    // 文字題的回答
     var drawings: [Drawing]? = nil    // 畫圖題的回答
+    var reactions: [Reaction]? = nil  // 看結果時大家按的表情（只有數量）
+    var myReaction: String? = nil
 
     var qKind: String { kind ?? "choice" }
     var isAnonymous: Bool { anonymous ?? true }
@@ -84,6 +86,11 @@ func extractInviteCode(_ raw: String) -> String? {
     }
     let bare = text.trimmingCharacters(in: .whitespacesAndNewlines)
     return bare.count == 8 && bare.allSatisfy({ alphabet.contains($0) }) ? bare : nil
+}
+
+struct Reaction: Codable, Equatable {
+    let emoji: String
+    let count: Int
 }
 
 struct TextAnswer: Codable, Equatable {
@@ -189,6 +196,11 @@ struct LocalState: Codable {
     var onboardingShown = false
     var lastGroupId: Int?             // 上次出題的群組，下次出題時預設選它
     var skippedByDay: [String: [Int]] = [:]   // 今天略過的題目：當天不再自動跳出
+    var skipStreak = 0                // 連續略過幾次（回答任何一題就歸零）
+    var skipStreakDay: String?
+    var quietDay: String?             // 這一天只通知開獎，不再跳題目
+    var firstSeen: Double?            // 第一次啟動的時間；剛安裝的前幾分鐘不跳卡片
+    var pausedUntil: Double?          // 暫停到什麼時候
 
     init() {}
     init(from decoder: Decoder) throws {   // 舊版 state.json 沒有新欄位時用預設值
@@ -198,6 +210,11 @@ struct LocalState: Codable {
         onboardingShown = try c.decodeIfPresent(Bool.self, forKey: .onboardingShown) ?? false
         lastGroupId = try c.decodeIfPresent(Int.self, forKey: .lastGroupId)
         skippedByDay = try c.decodeIfPresent([String: [Int]].self, forKey: .skippedByDay) ?? [:]
+        skipStreak = try c.decodeIfPresent(Int.self, forKey: .skipStreak) ?? 0
+        skipStreakDay = try c.decodeIfPresent(String.self, forKey: .skipStreakDay)
+        quietDay = try c.decodeIfPresent(String.self, forKey: .quietDay)
+        firstSeen = try c.decodeIfPresent(Double.self, forKey: .firstSeen)
+        pausedUntil = try c.decodeIfPresent(Double.self, forKey: .pausedUntil)
     }
 }
 

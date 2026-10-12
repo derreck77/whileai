@@ -81,7 +81,8 @@ def main():
         json.dump({"token": lin["token"], "name": "小林", "server": BASE}, open(os.path.join(data, "identity.json"), "w"))
 
         app = subprocess.Popen([APP], env=dict(os.environ, WHILEAI_DATA_DIR=data, WHILEAI_SERVER=BASE,
-                                               WHILEAI_DELAY="2", WHILEAI_GAP="0"),
+                                               WHILEAI_DELAY="2", WHILEAI_GAP="0",
+                                               WHILEAI_GRACE="0", WHILEAI_IDLE="3", WHILEAI_TEST="1"),
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(2)
 
@@ -130,10 +131,60 @@ def main():
         n = len(events(data))
         hook("UserPromptSubmit"); time.sleep(6)
         new = [e["type"] for e in events(data)[n:]]
-        check(new in ([], ["result_shown"]), f"所有題目都答完後，不會再跳出待答題（新事件：{new or '無'}）")
+        check("shown" not in new, f"所有題目都答完後，不會再跳出待答題（新事件：{new or '無'}）")
         hook("Stop"); time.sleep(3)
 
-        print("7. 隱私")
+        def ask(text, token, **extra):
+            body = {"text": text, "options": ["要", "不要"]}
+            body.update(extra)
+            return call("POST", f"/api/groups/{g['id']}/questions", body, token)
+
+        def no_new_card(seconds=6):
+            n = len(events(data))
+            hook("UserPromptSubmit"); time.sleep(seconds)
+            return [e["type"] for e in events(data)[n:] if e["type"] in ("shown", "onboarding_shown")]
+
+        print("7. 自己出的題不會跳給自己")
+        ask("我自己出的題", lin["token"])
+        check(no_new_card() == [], "只有自己出的題待答時，不跳卡片")
+        hook("Stop"); time.sleep(1)
+
+        print("8. 文字題先顯示小邀請卡；卡片閒置後縮成膠囊")
+        t = ask("Agent 今天做過最蠢的事？", kai["token"], kind="text")
+        hook("UserPromptSubmit")
+        last = wait_last(data, lambda e: e["type"] == "shown" and e.get("question") == t["id"])
+        check(last.get("question") == t["id"] and last.get("invite") is True, "文字題以小邀請卡顯示")
+        last = wait_last(data, lambda e: e["type"] == "collapsed", timeout=10)
+        check(last.get("type") == "collapsed", "閒置後縮成小膠囊")
+        hook("Stop"); time.sleep(1.5)
+        check(events(data)[-1]["type"] == "collapsed", "縮成膠囊後 Agent 完成：直接收起，不再提醒")
+
+        print("9. 連續略過 2 次：當天只通知開獎")
+        hook("UserPromptSubmit")
+        wait_last(data, lambda e: e["type"] == "shown")
+        hook("WhileAITestSkip")
+        last = wait_last(data, lambda e: e["type"] == "skipped")
+        check(last.get("type") == "skipped", "第 1 次略過")
+        hook("Stop"); time.sleep(1.5)
+        u = ask("第二題要不要？", kai["token"])
+        hook("UserPromptSubmit")
+        last = wait_last(data, lambda e: e["type"] == "shown" and e.get("question") == u["id"])
+        check(last.get("question") == u["id"], "略過的題目沒有再出現，換成下一題")
+        hook("WhileAITestSkip")
+        last = wait_last(data, lambda e: e["type"] == "quiet_today")
+        check(last.get("type") == "quiet_today", "第 2 次略過後進入「今天只通知開獎」")
+        time.sleep(5); hook("Stop"); time.sleep(1)
+        ask("安靜之後出的題", kai["token"])
+        check(no_new_card() == [], "安靜之後，新題目不再跳出")
+        hook("Stop"); time.sleep(1)
+        for u2 in (kai, mei, lin):   # 全員回答第二題 → 開獎
+            call("POST", f"/api/questions/{u['id']}/vote", {"answer": 0}, u2["token"])
+        hook("UserPromptSubmit")
+        last = wait_last(data, lambda e: e["type"] == "result_shown" and e.get("question") == u["id"])
+        check(last.get("type") == "result_shown", "安靜時仍然會通知開獎")
+        hook("Stop"); time.sleep(3)
+
+        print("10. 隱私")
         raw = open(os.path.join(data, "events.jsonl")).read() + open(os.path.join(data, "state.json")).read()
         check("機密" not in raw, "hook 送進來的 prompt 沒有出現在任何本機檔案")
     finally:

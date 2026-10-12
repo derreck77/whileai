@@ -67,6 +67,16 @@
   .dot { width: 22px; height: 22px; border-radius: 50%; padding: 0; border: 2px solid var(--line); }
   .dot.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
   .tools .ghost.on { background: var(--accent-soft); }
+  .step { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .num { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%;
+         background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; }
+  .small { font-size: 13px; margin: 0 0 10px; }
+  .cmd { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); border: 1px solid var(--line);
+         border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; word-break: break-all; user-select: all; }
+  .reacts { display: flex; gap: 6px; margin-top: 10px; }
+  .react { background: var(--bg); color: var(--muted); border: 1px solid var(--line); border-radius: 99px;
+           padding: 4px 10px; font-weight: 500; font-size: 13px; }
+  .react.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
   .error { color: #d64545; font-size: 13px; min-height: 1em; margin-top: 6px; }
   .tabs { display: flex; gap: 4px; margin: 20px 0 4px; }
   .tabs button { background: transparent; color: var(--muted); padding: 6px 12px; }
@@ -198,6 +208,7 @@ function renderHome() {
 }
 
 // ---------- 邀請頁 ----------
+// 朋友點邀請連結會到這裡。依他的情況給三條路：已經有 App、想安裝、先用網頁玩
 async function renderJoin(code) {
   let info;
   try { info = await api('GET', '/api/invites/' + code); }
@@ -205,18 +216,35 @@ async function renderJoin(code) {
   const already = me && me.groups.find(g => g.invite_code === code);
   if (already) return go('/g/' + already.id);
   $app.innerHTML = `${topBar()}
-    <p class="muted">你被邀請加入</p>
+    <p class="muted" style="margin-bottom:2px">你被邀請加入</p>
     <h1>${esc(info.name)}</h1>
-    <p class="muted">${info.member_count} 位成員 · 互相出題，答案匿名</p>
+    <p class="muted" style="margin-top:2px">${info.member_count} 位成員 · 等 AI Agent 的空檔，互相出題</p>
+
     <div class="card">
-      ${me ? '' : nameField()}
-      <div class="row" style="margin-top:10px">
-        <button id="join">用網頁加入</button>
-        <a href="whileai://join/${esc(code)}"><button class="secondary" type="button">在 WhileAI App 中加入</button></a>
-      </div>
-      <div class="error" id="err"></div>
+      <div class="step"><span class="num">1</span><b>已經有 WhileAI？</b></div>
+      <p class="muted small">一鍵用 App 加入。之後題目會在你等 Codex 或 Claude Code 時自己出現。</p>
+      <a href="whileai://join/${esc(code)}"><button type="button">在 WhileAI 中加入</button></a>
     </div>
-    <p class="faint">裝了 WhileAI 的 Mac App，題目會在你等 Codex 的空檔自動出現，不必打開網頁。</p>`;
+
+    ${info.install_cmd ? `<div class="card">
+      <div class="step"><span class="num">2</span><b>還沒安裝？</b></div>
+      <p class="muted small">在 Mac 的終端機貼上這一行。裝完會自動加入這個群組（需要 Apple Silicon 的 Mac）。</p>
+      <div class="cmd" id="cmd">${esc(info.install_cmd)}</div>
+      <button class="secondary" id="copycmd" type="button">複製安裝指令</button>
+    </div>` : ''}
+
+    <div class="card">
+      <div class="step"><span class="num">${info.install_cmd ? 3 : 2}</span><b>先不裝，用網頁玩</b></div>
+      <p class="muted small">在這個網頁回答和出題。題目不會自己跳出來，要回來這裡看。</p>
+      ${me ? '' : nameField()}
+      <div class="row" style="margin-top:10px"><button class="secondary" id="join">用網頁加入</button></div>
+      <div class="error" id="err"></div>
+    </div>`;
+  const copyBtn = document.getElementById('copycmd');
+  if (copyBtn) copyBtn.onclick = async () => {
+    try { await navigator.clipboard.writeText(info.install_cmd); copyBtn.textContent = '已複製 ✓'; }
+    catch { prompt('複製這一行：', info.install_cmd); }
+  };
   document.getElementById('join').onclick = async () => {
     try {
       if (!me) await ensureUser(document.getElementById('name').value);
@@ -404,6 +432,10 @@ async function renderGroup(gid) {
     const picked = [...document.querySelectorAll(`[data-pick="${qid}"]:checked`)].map(c => +c.value);
     if (picked.length) send(qid, picked); else alert('請至少選一個選項');
   });
+  document.querySelectorAll('[data-react]').forEach(b => b.onclick = async () => {
+    try { await api('POST', `/api/questions/${b.dataset.react}/react`, { emoji: b.dataset.emoji }); renderGroup(gid); }
+    catch (e) { alert(e.message); }
+  });
   document.querySelectorAll('canvas[data-dv]').forEach(c => paint(c, DV[+c.dataset.dv]));
   document.querySelectorAll('canvas[data-pad]').forEach(c => setupPad(c, send));
   document.querySelectorAll('[data-text]').forEach(b => b.onclick = () => {
@@ -471,6 +503,11 @@ function questionCard(q) {
         <span class="muted">${pct}% · ${q.results[i]} 票</span></div>
         <div class="bar ${mine(i) ? 'mine' : ''}"><i style="width:${Math.min(pct, 100)}%"></i></div>${names}`;
     }).join('');
+  }
+  // 看得到結果的人可以按表情（只顯示數量）
+  if (body !== null && q.reactions && (q.closed || q.my_answered)) {
+    body += `<div class="reacts">` + q.reactions.map(r =>
+      `<button class="react ${q.my_reaction === r.emoji ? 'on' : ''}" data-react="${q.id}" data-emoji="${r.emoji}">${r.emoji}${r.count ? ' ' + r.count : ''}</button>`).join('') + `</div>`;
   }
   const resultsHtml = body;
 

@@ -38,6 +38,8 @@ MAX_TEXT_ANSWER = 140
 # 畫圖題：回答是一組筆畫。座標是 0–1000 的整數（畫布寬 1000、高 700），不存圖片
 DRAW_COLORS = 6
 DRAW_WIDTHS = (1, 2)
+REACTIONS = ("😂", "👍", "😮", "❤️")   # 看結果時可以按的表情
+INSTALL_URL = os.environ.get("INSTALL_URL", "").rstrip("/")   # 邀請頁顯示的安裝來源（GitHub repo 網址）
 MAX_STROKES = 300
 MAX_DRAW_POINTS = 4000
 
@@ -81,6 +83,12 @@ CREATE TABLE IF NOT EXISTS votes (
   user_id INTEGER NOT NULL REFERENCES users(id),
   option_index INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
+  PRIMARY KEY (question_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS reactions (
+  question_id INTEGER NOT NULL REFERENCES questions(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  emoji TEXT NOT NULL,
   PRIMARY KEY (question_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -159,6 +167,7 @@ class Store:
                 if name not in have:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
         # 舊版會在新群組自動放三題示範題（沒有出題者）。這個功能已移除，把舊資料庫裡留下的也清掉
+        self.db.execute("DELETE FROM reactions WHERE question_id IN (SELECT id FROM questions WHERE author_id IS NULL)")
         self.db.execute("DELETE FROM votes WHERE question_id IN (SELECT id FROM questions WHERE author_id IS NULL)")
         self.db.execute("DELETE FROM questions WHERE author_id IS NULL")
         self.db.commit()
@@ -370,8 +379,31 @@ class Store:
     def delete_question(self, user, qid):
         """出題者撤回題目，連同所有回答一起刪除。"""
         self.require_author(user, qid)
+        self.db.execute("DELETE FROM reactions WHERE question_id = ?", (qid,))
         self.db.execute("DELETE FROM votes WHERE question_id = ?", (qid,))
         self.db.execute("DELETE FROM questions WHERE id = ?", (qid,))
+
+    def can_see_results(self, q, user):
+        """和 question_view 一致：截止後；或即時題在自己回答之後（出題者隨時可看）。"""
+        if self.is_closed(q):
+            return True
+        mine = self.db.execute("SELECT 1 FROM votes WHERE question_id = ? AND user_id = ?",
+                               (q["id"], user["id"])).fetchone()
+        return bool(q["live"]) and (mine is not None or q["author_id"] == user["id"])
+
+    def react(self, user, qid, emoji):
+        """對結果按表情。每人每題一個；再按同一個就取消。"""
+        q = self.question_row(qid)
+        self.require_member(q["group_id"], user)
+        if emoji not in REACTIONS:
+            raise ApiError(400, "不支援的表情")
+        if not self.can_see_results(q, user):
+            raise ApiError(409, "看得到結果之後才能按表情")
+        cur = self.db.execute("SELECT emoji FROM reactions WHERE question_id = ? AND user_id = ?",
+                              (qid, user["id"])).fetchone()
+        self.db.execute("DELETE FROM reactions WHERE question_id = ? AND user_id = ?", (qid, user["id"]))
+        if not cur or cur["emoji"] != emoji:
+            self.db.execute("INSERT INTO reactions VALUES (?, ?, ?)", (qid, user["id"], emoji))
 
     @staticmethod
     def is_closed(q):
@@ -423,6 +455,8 @@ class Store:
             "texts": None,        # 文字題：回答列表
             "drawings": None,     # 畫圖題：每個人的筆畫
             "hidden_reason": None,
+            "reactions": None,    # 各表情的數量（只有數量，不顯示是誰按的）
+            "my_reaction": None,
         }
         # 什麼時候看得到結果：截止後；或「即時」題在自己回答之後（出題者隨時可看）
         if not (closed or (live and (mine is not None or is_mine))):
@@ -432,6 +466,13 @@ class Store:
             view["hidden_reason"] = (f"回答人數不足 {MIN_REVEAL} 人，未公開結果" if closed
                                      else f"已有 {answered} 人回答，滿 {MIN_REVEAL} 人後顯示結果")
             return view
+        counts_by_emoji = {e: 0 for e in REACTIONS}
+        for r in self.db.execute("SELECT emoji, user_id FROM reactions WHERE question_id = ?", (qid,)):
+            if r["emoji"] in counts_by_emoji:
+                counts_by_emoji[r["emoji"]] += 1
+            if r["user_id"] == user["id"]:
+                view["my_reaction"] = r["emoji"]
+        view["reactions"] = [{"emoji": e, "count": counts_by_emoji[e]} for e in REACTIONS]
         rows = self.db.execute(
             "SELECT v.answer, v.option_index, u.name FROM votes v JOIN users u ON u.id = v.user_id "
             "WHERE v.question_id = ? ORDER BY v.created_at, v.user_id", (qid,)).fetchall()
@@ -590,7 +631,14 @@ def api_ask(h, user, body, gid):
 @route("GET", r"/api/invites/([A-Za-z0-9]+)", auth=False, limit=("invite", 120, 3600))
 def api_invite(h, user, body, code):
     g = h.store.invite_info(code)
-    return {"name": g["name"], "member_count": h.store.member_count(g["id"])}
+    info = {"name": g["name"], "member_count": h.store.member_count(g["id"]), "code": g["invite_code"],
+            "install_url": None, "install_cmd": None}
+    if INSTALL_URL:
+        # 安裝指令直接帶邀請碼，裝完就自動加入
+        info["install_url"] = INSTALL_URL
+        info["install_cmd"] = (f"git clone {INSTALL_URL}.git && cd {INSTALL_URL.rsplit('/', 1)[-1]} "
+                               f"&& ./setup.sh {g['invite_code']}")
+    return info
 
 
 @route("POST", r"/api/invites/([A-Za-z0-9]+)/join", limit=("join", 60, 3600))
@@ -603,6 +651,19 @@ def api_join(h, user, body, code):
 def api_vote(h, user, body, qid):
     # "option" 是舊版 App 送的欄位名稱
     h.store.vote(user, int(qid), body.get("answer", body.get("option")))
+    return h.store.question_view(h.store.question_row(int(qid)), user)
+
+
+@route("GET", r"/api/questions/(\d+)")
+def api_question(h, user, body, qid):
+    q = h.store.question_row(int(qid))
+    h.store.require_member(q["group_id"], user)
+    return h.store.question_view(q, user)
+
+
+@route("POST", r"/api/questions/(\d+)/react", limit=("react", 600, 3600))
+def api_react(h, user, body, qid):
+    h.store.react(user, int(qid), body.get("emoji"))
     return h.store.question_view(h.store.question_row(int(qid)), user)
 
 

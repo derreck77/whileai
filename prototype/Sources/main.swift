@@ -161,6 +161,37 @@ if CommandLine.arguments.dropFirst().first == "snapshot" {
         $0.question = c
     }
 
+    // 打擾預算與流程
+    add("40-pill", .card, stack: []) { $0.question = pending[0]; $0.remaining = 1; $0.pill = true }
+    add("41-quiet-notice", .card, stack: []) { $0.question = pending[0]; $0.quietNotice = true }
+    add("42-card-invite-draw", .card, stack: []) {
+        $0.question = q(20, "用畫的：你現在的心情", author: "美玲", kind: "draw", options: [], answered: 2); $0.invite = true
+    }
+    add("43-card-invite-text", .card, stack: []) {
+        $0.question = q(14, "Agent 今天做過最蠢的事？", author: "阿凱", kind: "text", options: []); $0.invite = true
+        $0.agentName = "Claude Code"
+    }
+    add("44-group-new", .group(3)) {
+        let g = Group(id: 3, name: "午餐團", inviteCode: "T4WQ8ZRA", inviteUrl: "https://x/j/T4WQ8ZRA", memberCount: 1, muted: false)
+        $0.details[3] = GroupDetail(group: g, questions: [])
+    }
+    add("45-group-invited-no-question", .group(2))
+    add("46-result-reactions", .question) {
+        var r = result
+        r.reactions = [Reaction(emoji: "😂", count: 3), Reaction(emoji: "👍", count: 1), Reaction(emoji: "😮", count: 0), Reaction(emoji: "❤️", count: 0)]
+        r.myReaction = "😂"
+        $0.question = r
+    }
+    add("47-home-states", .home, stack: []) { $0.offline = true; $0.quietToday = true; $0.showPauseOptions = true }
+    add("48-home-paused", .home, stack: []) { $0.paused = true; $0.pausedLabel = "已暫停到 15:30" }
+    add("49-question-after-ask", .question, stack: [.home, .group(1)]) {
+        var mine = q(30, "中午吃什麼？", author: "derreck", mine: true, options: ["便當", "麵", "輕食"], anonymous: false, live: true,
+                     answered: 0, results: [0, 0, 0], closes: 3600)
+        mine.myAnswered = false; mine.voters = [[], [], []]
+        $0.question = mine
+        $0.notice = "已發出，7 位成員會在等 Agent 時看到。你也答一下吧。"
+    }
+
     MainActor.assumeIsolated {
         for (name, m) in cases {
             let view = PanelView(m: m).padding(24)

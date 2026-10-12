@@ -34,13 +34,18 @@ protocol PanelActions: AnyObject {
     func createGroup()
     func joinGroup()
     func pasteInvite()
-    func startAsk(groupId: Int?)
+    func startAsk(groupId: Int?, template: AskTemplate?)
     func selectAskGroup(_ id: Int)
     func applyTemplate(_ t: AskTemplate)
     func askQuestion()
     func toggleMute(groupId: Int)
     func copyInvite(_ g: Group)
-    func togglePause()
+    func pause(_ option: String)      // hour｜tomorrow｜forever｜resume
+    func resumeQuiet()
+    func cardHover(_ inside: Bool)
+    func expandPill()
+    func expandInvite()
+    func react(_ emoji: String)
     func connectAgents()
     func quit()
 }
@@ -56,6 +61,13 @@ final class Model: ObservableObject {
     @Published var onboarding = false          // 自動卡片顯示的是引導（還沒加入群組）
     @Published var question: Question?
     @Published var remaining = 0               // 這題之外還有幾題待答
+    @Published var pill = false                // 自動卡片閒置後縮成小膠囊
+    @Published var invite = false              // 文字題、畫圖題：先顯示小邀請卡
+    @Published var quietNotice = false         // 剛進入「今天只通知開獎」，顯示一行說明
+    @Published var quietToday = false
+    @Published var offline = false             // 連不上伺服器
+    @Published var pausedLabel = ""
+    @Published var showPauseOptions = false
     @Published var confirmWithdraw = false
 
     @Published var me: Me?
@@ -140,7 +152,7 @@ struct PrimaryButton: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 if let icon = icon { Image(systemName: icon).font(.system(size: 11, weight: .bold)) }
-                Text(title).font(.system(size: 13, weight: .semibold))
+                Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 14)
@@ -168,10 +180,10 @@ struct SoftButton: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 if let icon = icon { Image(systemName: icon).font(.system(size: 11, weight: .semibold)) }
-                Text(title).font(.system(size: 13, weight: .medium))
+                Text(title).font(.system(size: 13, weight: .medium)).lineLimit(1).minimumScaleFactor(0.75)
             }
             .foregroundStyle(tint.opacity(enabled ? 1 : 0.4))
-            .padding(.horizontal, 12)
+            .padding(.horizontal, full ? 6 : 12)
             .frame(maxWidth: full ? .infinity : nil)
             .frame(height: 32)
             .background(RoundedRectangle(cornerRadius: 9).fill(tint.opacity(hover && enabled ? 0.14 : 0.08)))
@@ -329,6 +341,7 @@ struct Row: View {
     let title: String
     var subtitle: String? = nil
     var accent = false
+    var subtitleTint: Color? = nil
     let action: () -> Void
     @State private var hover = false
 
@@ -350,7 +363,7 @@ struct Row: View {
                     if let subtitle = subtitle {
                         Text(subtitle)
                             .font(.system(size: 10.5))
-                            .foregroundStyle(accent ? Color.accentColor : Color.secondary)
+                            .foregroundStyle(subtitleTint ?? (accent ? Color.accentColor : Color.secondary))
                             .lineLimit(1)
                     }
                 }
@@ -433,20 +446,73 @@ struct PanelView: View {
     @ObservedObject var m: Model
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            if let notice = m.notice, m.screen != .card {
-                Banner(text: notice, icon: "checkmark.circle.fill", tint: .green)
+        if m.screen == .card && m.pill {
+            pill
+        } else if m.screen == .card && m.quietNotice {
+            quietNotice
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                if let notice = m.notice, m.screen != .card {
+                    Banner(text: notice, icon: "checkmark.circle.fill", tint: .green)
+                }
+                content
+                if let err = m.error {
+                    Banner(text: err, icon: "exclamationmark.triangle.fill", tint: .red)
+                }
             }
-            content
-            if let err = m.error {
-                Banner(text: err, icon: "exclamationmark.triangle.fill", tint: .red)
-            }
+            .padding(Theme.pad)
+            .frame(width: Theme.width)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.radius))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Color.primary.opacity(0.1)))
+            .onHover { m.actions?.cardHover($0) }
         }
-        .padding(Theme.pad)
-        .frame(width: Theme.width)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.radius))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Color.primary.opacity(0.1)))
+    }
+
+    /// 卡片閒置後縮成的小膠囊：不擋畫面，點一下或滑鼠移上來就展開
+    var pill: some View {
+        Button(action: { m.actions?.expandPill() }) {
+            HStack(spacing: 6) {
+                PulseDot(color: .accentColor)
+                Text(pillText).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
+            }
+            .fixedSize()
+            .padding(.horizontal, 11)
+            .frame(height: 28)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.primary.opacity(0.12)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PressStyle())
+        .onHover { if $0 { m.actions?.expandPill() } }
+        .help("展開題目")
+    }
+
+    var pillText: String {
+        guard let q = m.question, !m.onboarding else { return "WhileAI" }
+        if q.closed { return "開獎了：\(q.groupName)" }
+        let n = m.remaining + (q.answered ? 0 : 1)
+        return n > 1 ? "\(n) 題待答" : (q.answered ? "\(q.groupName)" : "\(q.authorName) 問了一題")
+    }
+
+    /// 連續略過之後：告訴使用者今天不會再跳題目
+    var quietNotice: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "moon.fill").font(.system(size: 12)).foregroundStyle(.secondary).padding(.top, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("今天先不打擾了").font(.system(size: 13, weight: .semibold))
+                Text("只在開獎時通知你。想答題的話，點選單列的 ⏳。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(width: 280)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.1)))
     }
 
     @ViewBuilder var header: some View {
@@ -569,14 +635,20 @@ struct HomeView: View {
             emptyState
         } else {
             VStack(alignment: .leading, spacing: 8) {
-                PrimaryButton(title: "出題", icon: "plus") { m.actions?.startAsk(groupId: nil) }
+                if m.offline {
+                    Banner(text: "連不上伺服器，畫面可能不是最新的。稍後會自動重試。", icon: "wifi.slash", tint: .orange)
+                }
+                PrimaryButton(title: "出題", icon: "plus") { m.actions?.startAsk(groupId: nil, template: nil) }
 
                 if !m.feed.pending.isEmpty {
                     SectionLabel(text: "待你回答", count: m.feed.pending.count)
                     CappedList(count: m.feed.pending.count, rowHeight: 50, maxHeight: 156) {
                         ForEach(m.feed.pending) { q in
-                            Row(icon: q.kindSymbol, iconTint: .accentColor, title: q.text,
-                                subtitle: "\(q.groupName) · \(q.authorName) · \(timeLeft(q.closesAt))", accent: true) {
+                            // 一小時內截止的用橘色標出來
+                            let urgent = q.closesAt - Date().timeIntervalSince1970 < 3600
+                            Row(icon: q.kindSymbol, iconTint: urgent ? .orange : .accentColor, title: q.text,
+                                subtitle: "\(q.groupName) · \(q.isMine ? "你出的題" : q.authorName) · \(timeLeft(q.closesAt))",
+                                accent: true, subtitleTint: urgent ? .orange : nil) {
                                 m.actions?.openQuestion(q)
                             }
                         }
@@ -620,18 +692,16 @@ struct HomeView: View {
                 }
 
                 Divider().padding(.top, 2)
-                HStack {
-                    Button(action: { m.actions?.togglePause() }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: m.paused ? "play.fill" : "pause.fill").font(.system(size: 8))
-                            Text(m.paused ? "已暫停 · 點此恢復" : "暫停 1 小時").font(.system(size: 11))
-                        }
-                        .foregroundStyle(m.paused ? Color.orange : Color.secondary)
+                if m.quietToday && !m.paused {
+                    HStack(spacing: 4) {
+                        Image(systemName: "moon.fill").font(.system(size: 9))
+                        Text("今天只通知開獎").font(.system(size: 11))
+                        LinkButton(title: "恢復") { m.actions?.resumeQuiet() }
+                        Spacer()
                     }
-                    .buttonStyle(.plain)
-                    Spacer()
-                    Text(m.me?.user.name ?? "").font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                 }
+                PauseControl(m: m)
             }
         }
     }
@@ -712,22 +782,41 @@ struct GroupView: View {
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.accentColor.opacity(0.09)))
 
-                if d.group.memberCount < 3 {
-                    Hint(text: d.group.memberCount == 1 ? "現在只有你一個人。把邀請貼給朋友，他們加入後就能一起玩。"
-                                                         : "群組有 2 人。匿名題要滿 3 人回答才會顯示結果，人少時建議用具名題。")
+                // 新群組的兩步引導：邀請朋友 → 出第一題。兩步都完成後消失
+                let invited = d.group.memberCount > 1
+                let asked = !d.questions.isEmpty
+                if !invited || !asked {
+                    VStack(alignment: .leading, spacing: 8) {
+                        GuideStep(n: 1, done: invited, title: invited ? "朋友已經加入" : "邀請朋友",
+                                  detail: invited ? nil : "按上面的「複製邀請」，把連結貼給朋友。")
+                        GuideStep(n: 2, done: asked, title: asked ? "已經出了第一題" : "出第一題",
+                                  detail: asked ? nil : "挑一個開場：")
+                        if !asked {
+                            HStack(spacing: 6) {
+                                ForEach(["lunch", "decide", "draw"], id: \.self) { tid in
+                                    if let t = AskTemplate.all.first(where: { $0.id == tid }) {
+                                        SoftButton(title: t.label, full: true) { m.actions?.startAsk(groupId: id, template: t) }
+                                    }
+                                }
+                            }
+                            .padding(.leading, 26)
+                        }
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Theme.fill(0.05)))
+                } else if d.group.memberCount < 3 {
+                    Hint(text: "群組有 2 人。匿名題要滿 3 人回答才會顯示結果，人少時建議用具名題。")
                 }
 
                 HStack(spacing: 8) {
-                    PrimaryButton(title: "出題", icon: "plus") { m.actions?.startAsk(groupId: id) }
+                    PrimaryButton(title: "出題", icon: "plus") { m.actions?.startAsk(groupId: id, template: nil) }
                     SoftButton(title: d.group.muted ? "取消靜音" : "靜音", icon: d.group.muted ? "bell" : "bell.slash") {
                         m.actions?.toggleMute(groupId: id)
                     }
                 }
 
-                SectionLabel(text: "題目")
-                if d.questions.isEmpty {
-                    Hint(text: "還沒有題目，出第一題吧。")
-                } else {
+                if !d.questions.isEmpty {
+                    SectionLabel(text: "題目")
                     CappedList(count: d.questions.count, rowHeight: 50, maxHeight: 208) {
                         ForEach(d.questions) { q in
                             let waiting = !q.closed && !q.answered
@@ -822,7 +911,13 @@ struct AskView: View {
             // 情境範本：點一下帶入設定，內容都可以再改
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
                 ForEach(AskTemplate.all) { t in
-                    Button(action: { m.actions?.applyTemplate(t); focus = 0 }) {
+                    Button(action: {
+                        m.actions?.applyTemplate(t)
+                        focus = 0
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+                        }
+                    }) {
                         VStack(spacing: 2) {
                             Text(t.symbol).font(.system(size: 16))
                             Text(t.name).font(.system(size: 10, weight: .medium)).lineLimit(1).minimumScaleFactor(0.8)
@@ -986,7 +1081,15 @@ struct QuestionView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if !q.closed && !q.answered {
+            if m.screen == .card && m.invite && !q.closed && !q.answered {
+                // 要打字、要畫圖的題目：先問一聲，願意才展開
+                HStack(spacing: 8) {
+                    PrimaryButton(title: q.qKind == "draw" ? "來畫" : "來回答", icon: q.qKind == "draw" ? "scribble.variable" : "text.bubble") {
+                        m.actions?.expandInvite()
+                    }
+                    SoftButton(title: "稍後") { m.actions?.skipCard() }
+                }
+            } else if !q.closed && !q.answered {
                 // 還沒回答就一定先顯示作答區。出題者自己也要能回答：
                 // 即時題的出題者可以提前看結果，但結果放在作答區下面，不能把作答區蓋掉
                 answerUI
@@ -1000,6 +1103,7 @@ struct QuestionView: View {
                 }
             } else if q.hasResults {
                 ResultsView(q: q)
+                if let reactions = q.reactions { ReactionBar(reactions: reactions, mine: q.myReaction) { m.actions?.react($0) } }
             } else if q.closed {
                 Banner(text: q.hiddenReason ?? "結果未公開", icon: "lock.fill", tint: .secondary)
             } else {
@@ -1025,6 +1129,12 @@ struct QuestionView: View {
         if (q.answered || q.closed) && m.remaining > 0 {
             SoftButton(title: "下一題（還有 \(m.remaining) 題）", icon: "arrow.right", full: true, tint: .accentColor) {
                 m.actions?.showNextPending()
+            }
+        }
+        // 看完結果可以接著出一題，把互動延續下去
+        if q.closed && m.remaining == 0 && m.screen != .card {
+            SoftButton(title: q.isMine ? "追問一題" : "換我出一題", icon: "plus", full: true) {
+                m.actions?.startAsk(groupId: q.groupId, template: nil)
             }
         }
         // 出題者：提前開獎、撤回
@@ -1231,6 +1341,97 @@ struct ResultsView: View {
                 }
             }
             .onAppear { withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) { shown = true } }
+        }
+    }
+}
+
+/// 看結果時的表情回應。只顯示數量，不顯示是誰按的
+struct ReactionBar: View {
+    let reactions: [Reaction]
+    let mine: String?
+    let action: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(reactions, id: \.emoji) { r in
+                Button(action: { action(r.emoji) }) {
+                    HStack(spacing: 3) {
+                        Text(r.emoji).font(.system(size: 13))
+                        if r.count > 0 {
+                            Text("\(r.count)").font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                                .foregroundStyle(mine == r.emoji ? Color.accentColor : Color.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+                    .background(Capsule().fill(mine == r.emoji ? Color.accentColor.opacity(0.18) : Theme.fill(0.06)))
+                    .overlay(Capsule().stroke(mine == r.emoji ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(PressStyle())
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+struct GuideStep: View {
+    let n: Int
+    let done: Bool
+    let title: String
+    var detail: String? = nil
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            ZStack {
+                Circle().fill(done ? Color.green : Color.accentColor.opacity(0.16)).frame(width: 18, height: 18)
+                if done {
+                    Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                } else {
+                    Text("\(n)").font(.system(size: 10.5, weight: .bold)).foregroundStyle(Color.accentColor)
+                }
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 13, weight: done ? .regular : .semibold))
+                    .foregroundStyle(done ? Color.secondary : Color.primary)
+                if let detail = detail {
+                    Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+/// 暫停跳出卡片：點了才展開三個選項
+struct PauseControl: View {
+    @ObservedObject var m: Model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button(action: {
+                    if m.paused { m.actions?.pause("resume") } else { withAnimation(.easeOut(duration: 0.15)) { m.showPauseOptions.toggle() } }
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: m.paused ? "play.fill" : "pause.fill").font(.system(size: 8))
+                        Text(m.paused ? "\(m.pausedLabel) · 點此恢復" : "暫停跳出卡片").font(.system(size: 11))
+                    }
+                    .foregroundStyle(m.paused ? Color.orange : Color.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Text(m.me?.user.name ?? "").font(.system(size: 11)).foregroundStyle(.tertiary)
+            }
+            if m.showPauseOptions && !m.paused {
+                HStack(spacing: 6) {
+                    SoftButton(title: "1 小時", full: true) { m.actions?.pause("hour") }
+                    SoftButton(title: "到明天", full: true) { m.actions?.pause("tomorrow") }
+                    SoftButton(title: "直到我恢復", full: true) { m.actions?.pause("forever") }
+                }
+            }
         }
     }
 }
@@ -1455,9 +1656,16 @@ struct SettingsView: View {
             }
 
             SectionLabel(text: "跳出卡片")
-            SoftButton(title: m.paused ? "已暫停 · 點此恢復" : "暫停 1 小時", icon: m.paused ? "play.fill" : "pause.fill",
-                       full: true, tint: m.paused ? .orange : .primary) { m.actions?.togglePause() }
-            Hint(text: "卡片只在 Agent 工作超過 8 秒時出現；Agent 需要你時會自動收起。")
+            if m.paused {
+                SoftButton(title: "\(m.pausedLabel) · 點此恢復", icon: "play.fill", full: true, tint: .orange) { m.actions?.pause("resume") }
+            } else {
+                HStack(spacing: 6) {
+                    SoftButton(title: "暫停 1 小時", full: true) { m.actions?.pause("hour") }
+                    SoftButton(title: "到明天", full: true) { m.actions?.pause("tomorrow") }
+                    SoftButton(title: "直到我恢復", full: true) { m.actions?.pause("forever") }
+                }
+            }
+            Hint(text: "卡片只在 Agent 工作超過 8 秒時出現，閒置一下就會縮小；Agent 需要你時會自動收起。連續略過 2 次，當天就只通知開獎。")
 
             if m.canConnectAgents {
                 SectionLabel(text: "Agent")

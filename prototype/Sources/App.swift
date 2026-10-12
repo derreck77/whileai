@@ -31,12 +31,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     var pendingShow: DispatchWorkItem?
     var pendingHide: DispatchWorkItem?
     var lastShown = Date.distantPast
-    var pausedUntil = Date.distantPast { didSet { model.paused = Date() < pausedUntil } }
+    var pausedUntil = Date.distantPast { didSet { syncPauseLabel() } }
+    var idleWork: DispatchWorkItem?     // 卡片閒置一陣子後縮成小膠囊
+    var reRegistering = false
+    var serverResetNotice = false       // 伺服器資料重設過：下次打開面板時說明一次
 
     // 低干擾設定：任務超過 showDelay 秒才顯示；兩張卡片之間至少隔 minGap 秒；每天最多 dailyLimit 道新題目
     let showDelay = Double(ProcessInfo.processInfo.environment["WHILEAI_DELAY"] ?? "") ?? 8
     let minGap = Double(ProcessInfo.processInfo.environment["WHILEAI_GAP"] ?? "") ?? 180
     let dailyLimit = 5
+    // 打擾預算：卡片閒置 idleDelay 秒就縮成膠囊；同一天連續略過 quietAfterSkips 次，當天只通知開獎；
+    // 剛安裝的前 grace 秒不跳卡片
+    let idleDelay = Double(ProcessInfo.processInfo.environment["WHILEAI_IDLE"] ?? "") ?? 15
+    let grace = Double(ProcessInfo.processInfo.environment["WHILEAI_GRACE"] ?? "") ?? 300
+    let quietAfterSkips = 2
 
     /// 目前面板是不是 Agent 工作時自動跳出的卡片（不是使用者自己打開的）
     var isAutoCard: Bool { model.screen == .card }
@@ -78,11 +86,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
             }
             self.refresh()
         }
+        if state.firstSeen == nil {
+            state.firstSeen = Date().timeIntervalSince1970
+            Store.save(state, to: "state.json")
+        }
+        if let p = state.pausedUntil { pausedUntil = Date(timeIntervalSince1970: p) }
+        model.quietToday = state.quietDay == today
+
         Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.pruneStaleSessions()
             self?.refresh()
-            if let self = self, self.model.paused, Date() >= self.pausedUntil { self.pausedUntil = .distantPast }
+            if let self = self {
+                if self.model.paused, Date() >= self.pausedUntil { self.pausedUntil = .distantPast }
+                self.model.quietToday = self.state.quietDay == self.today
+            }
         }
+        // 結果畫面開著時自動更新：別人後來回答了，不用關掉重開
+        Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in self?.refreshOpenQuestion() }
     }
 
     func applicationWillTerminate(_ note: Notification) {
@@ -114,8 +134,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
             self.closePanel()
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            if e.keyCode == 53, let self = self, self.panel.isKeyWindow {   // Esc
+            guard let self = self, self.panel.isKeyWindow else { return e }
+            if e.keyCode == 53 {   // Esc
                 self.isAutoCard ? self.skipCard() : self.closePanel()
+                return nil
+            }
+            // 數字鍵回答單選題、評分題（正在打字時不攔截）
+            if !(self.panel.firstResponder is NSTextView), e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+               let n = Int(e.charactersIgnoringModifiers ?? ""), n >= 1,
+               self.model.screen == .question || (self.isAutoCard && !self.model.onboarding && !self.model.pill),
+               let q = self.model.question, !q.closed, !q.answered, ["choice", "scale"].contains(q.qKind),
+               n <= q.options.count {
+                self.vote(n - 1)
                 return nil
             }
             return e
@@ -163,8 +193,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     func openPanel(_ screen: Screen, stack: [Screen] = []) {
         cancelShow()
         pendingHide?.cancel()
+        idleWork?.cancel()
+        model.pill = false
+        model.invite = false
+        model.quietNotice = false
         model.error = nil
         model.notice = nil
+        if serverResetNotice {
+            model.notice = "伺服器的資料重設過，群組需要重新建立或加入。"
+            serverResetNotice = false
+        }
         model.stack = stack
         model.screen = screen
         prepare(screen)
@@ -197,15 +235,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         model.stack = []
         model.screen = .card
         model.error = nil
+        model.pill = false
+        model.quietNotice = false
         layoutPanel()
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { $0.duration = 0.2; panel.animator().alphaValue = 1 }
+        startIdleTimer()
+    }
+
+    // MARK: 卡片閒置 → 縮成小膠囊
+
+    /// 使用者已經開始作答（選了選項、畫了幾筆、打了字）就不要縮起來
+    var userIsAnswering: Bool {
+        !model.multiSelection.isEmpty || !model.strokes.isEmpty || !model.answerText.isEmpty || model.busy
+    }
+
+    func startIdleTimer() {
+        idleWork?.cancel()
+        guard isAutoCard else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.panel.isVisible, self.isAutoCard, self.model.phase == .working,
+                  !self.model.pill, !self.model.quietNotice, !self.userIsAnswering else { return }
+            self.model.pill = true
+            Store.log("collapsed", question: self.model.question?.id)
+        }
+        idleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + idleDelay, execute: work)
+    }
+
+    /// 滑鼠在卡片上就不倒數；移開後重新倒數
+    func cardHover(_ inside: Bool) {
+        guard isAutoCard, !model.pill else { return }
+        if inside { idleWork?.cancel() } else { startIdleTimer() }
+    }
+
+    func expandPill() {
+        guard model.pill else { return }
+        model.pill = false
+        Store.log("expanded", question: model.question?.id)
+        startIdleTimer()
+    }
+
+    /// 文字題、畫圖題的小邀請卡 →「來回答」
+    func expandInvite() {
+        model.invite = false
+        Store.log("invite_expanded", question: model.question?.id, extra: ["kind": model.question?.qKind ?? ""])
+        startIdleTimer()
     }
 
     func closePanel() {
         guard panel.isVisible else { return }
         pendingHide?.cancel()
+        idleWork?.cancel()
         NSAnimationContext.runAnimationGroup({ $0.duration = 0.15; panel.animator().alphaValue = 0 },
                                              completionHandler: { [weak self] in
             self?.panel.orderOut(nil)
@@ -311,13 +393,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     func quit() { NSApp.terminate(nil) }
 
     /// 出題：首頁或群組頁都可以進來。只有一個群組時自動選它，否則預設上次用的群組
-    func startAsk(groupId: Int?) {
+    func startAsk(groupId: Int?, template: AskTemplate?) {
         let groups = model.groups
         guard !groups.isEmpty else { go(.createGroup); return }
         let preferred = groupId ?? state.lastGroupId
         model.askGroupId = groups.contains { $0.id == preferred } ? preferred : groups[0].id
         model.askShowSettings = false
-        applyTemplate(AskTemplate.all[0])
+        applyTemplate(template ?? AskTemplate.all[0])
         go(.ask)
     }
 
@@ -400,15 +482,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         }
     }
 
+    /// 伺服器不認得這組身分（例如伺服器資料被重設）：用原本的暱稱自動重新註冊，不打斷使用者
     func identityRejected() {
-        guard identity != nil else { return }
+        guard let old = identity, !reRegistering else { return }
+        reRegistering = true
         identity = nil
         api.token = nil
-        model.me = nil
         model.feed = Feed(pending: [], results: [])
+        model.unseenResults = []
+        model.details = [:]
         updateBadge()
-        openPanel(.welcome)
-        model.error = "伺服器上找不到你的身分，請重新取一個暱稱。"
+        struct Created: Codable { let token: String; let user: UserInfo }
+        api.call("POST", "/api/users", body: ["name": old.name], as: Created.self) { [weak self] r in
+            guard let self = self else { return }
+            self.reRegistering = false
+            switch r {
+            case .success(let c):
+                self.identity = Identity(token: c.token, name: c.user.name, server: self.api.base)
+                Store.save(self.identity, to: "identity.json")
+                self.api.token = c.token
+                self.model.me = Me(user: c.user, groups: [])
+                self.serverResetNotice = true
+                Store.log("identity_recreated")
+                self.refresh()
+                // 面板正開著：回到首頁並說明一次
+                if self.panel.isVisible && !self.isAutoCard { self.openPanel(.home) }
+            case .failure(.message(let m)):
+                self.model.me = nil
+                self.model.nickname = old.name
+                self.openPanel(.welcome)
+                self.model.error = m
+            }
+        }
     }
 
     // MARK: - 同步
@@ -417,15 +522,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         guard identity != nil else { then?(); return }
         api.call("GET", "/api/feed", as: Feed.self) { [weak self] r in
             guard let self = self else { return }
-            if case .success(let f) = r {
-                self.model.feed = f
+            switch r {
+            case .success(let f):
+                // 快截止的排前面：30 分鐘後截止的午餐題不該排在 3 天後才截止的題目後面
+                self.model.feed = Feed(pending: f.pending.sorted { $0.closesAt < $1.closesAt }, results: f.results, mine: f.mine)
                 self.model.unseenResults = f.results.filter { !self.state.seenResults.contains($0.id) }
+                self.model.offline = false
+            case .failure:
+                self.model.offline = self.identity != nil
             }
             self.updateBadge()
             then?()
         }
         api.call("GET", "/api/me", as: Me.self) { [weak self] r in
             if case .success(let me) = r { self?.model.me = me }
+        }
+    }
+
+    /// 面板上開著一道還沒截止的題目：定時重新抓一次，結果和進度會自己更新
+    func refreshOpenQuestion() {
+        guard panel.isVisible, !model.pill, !model.busy, identity != nil,
+              model.screen == .question || (isAutoCard && !model.onboarding),
+              let q = model.question, !q.closed else { return }
+        api.call("GET", "/api/questions/\(q.id)", as: Question.self) { [weak self] r in
+            guard let self = self, case .success(let updated) = r,
+                  self.model.question?.id == updated.id, self.model.question != updated else { return }
+            self.model.question = updated
+            self.markSeenIfClosed(updated)
+        }
+    }
+
+    func react(_ emoji: String) {
+        guard let q = model.question else { return }
+        api.call("POST", "/api/questions/\(q.id)/react", body: ["emoji": emoji], as: Question.self) { [weak self] r in
+            guard let self = self, self.model.question?.id == q.id else { return }
+            switch r {
+            case .success(let updated): self.model.question = updated
+            case .failure(.message(let m)): self.model.error = m
+            }
         }
     }
 
@@ -539,12 +673,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     }
 
     func copyInvite(_ g: Group) {
-        var text = "來 WhileAI 一起玩「\(g.name)」！等 Agent 的空檔互相出題。\n\n邀請碼：\(g.inviteCode)\n已經有 WhileAI：點選單列的 ⏳ →「加入」→「貼上邀請」"
-        if let install = Store.installURL, let repo = URL(string: install) {
-            // 安裝指令直接帶邀請碼，裝完就自動加入
-            text += "\n還沒安裝（在終端機貼上這一行）：\ngit clone \(install).git && cd \(repo.lastPathComponent) && ./setup.sh \(g.inviteCode)"
-        }
-        text += "\n不裝 App 也能用網頁回答：\(g.inviteUrl)"
+        // 只給一條連結。連結的網頁會依對方有沒有安裝，帶他加入、安裝，或直接用網頁回答
+        let text = "來 WhileAI 和我一起玩「\(g.name)」，等 Agent 的空檔互相出題 👉 \(g.inviteUrl)"
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         model.copiedGroup = g.id
@@ -602,12 +732,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
                 self.state.lastGroupId = groupId
                 Store.save(self.state, to: "state.json")
                 self.refresh()
-                // 發完回到群組頁，看得到剛出的題目
-                self.model.stack = [.home]
-                self.replace(with: .group(groupId))
+                self.loadGroup(groupId)
+                // 發出後直接打開這一題：出題者當場作答，順便看到題目實際的樣子。返回會回到群組頁
+                self.model.stack = [.home, .group(groupId)]
+                self.showQuestion(q, remaining: 0)
+                self.replace(with: .question)
                 let others = max(q.memberCount - 1, 0)
-                self.model.notice = others > 0 ? "已發出。\(others) 位成員會在等 Agent 時看到。"
-                                               : "已發出。邀請朋友加入後，他們就會看到。"
+                self.model.notice = others > 0 ? "已發出，\(others) 位成員會在等 Agent 時看到。你也答一下吧。"
+                                               : "已發出。你可以先答；邀請朋友加入後，他們就會看到。"
             case .failure(.message(let m)):
                 self.model.error = m
             }
@@ -638,7 +770,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         let current = model.question?.id
         guard let next = model.feed.pending.first(where: { $0.id != current }) else { return }
         pendingHide?.cancel()
+        model.invite = false   // 使用者自己選擇繼續，直接顯示完整作答區
         showQuestion(next, remaining: model.feed.pending.filter { $0.id != next.id && $0.id != current }.count)
+        startIdleTimer()
         Store.log("next_question", question: next.id, extra: ["auto": isAutoCard])
     }
 
@@ -708,6 +842,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
                 // 只記錄題型與是否來自自動卡片，不記錄回答內容
                 Store.log("voted", question: q.id, extra: ["kind": q.qKind, "auto": self.isAutoCard])
                 if self.isAutoCard {
+                    // 願意回答，代表現在不介意被問：連續略過的計數歸零
+                    self.state.skipStreak = 0
+                    Store.save(self.state, to: "state.json")
+                    self.startIdleTimer()
                     if self.model.phase == .done {
                         self.scheduleHide(after: 5)
                     } else if !updated.hasResults && self.model.remaining == 0 {
@@ -746,6 +884,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
                 cancelShow()
                 if panel.isVisible && isAutoCard { agentFinished() }
             }
+        case "WhileAITestSkip" where ProcessInfo.processInfo.environment["WHILEAI_TEST"] == "1":
+            // 只在測試模式啟用：模擬使用者按下略過，讓自動測試能驗證「連續略過就安靜」的規則
+            if isAutoCard { skipCard() }
         default:
             break
         }
@@ -769,6 +910,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     func scheduleShow() {
         guard pendingShow == nil, !panel.isVisible, !activeSessions.isEmpty else { return }
         guard Date() >= pausedUntil, Date().timeIntervalSince(lastShown) >= minGap else { return }
+        // 剛安裝的前幾分鐘不跳卡片，避免第一印象就是被打擾
+        guard Date().timeIntervalSince1970 - (state.firstSeen ?? 0) >= grace else { return }
         guard nextQuestion() != nil || needsOnboarding else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
@@ -786,6 +929,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     }
 
     func agentFinished() {
+        // 已經縮成膠囊：Agent 做完就直接收起，不用再展開提醒
+        if model.pill { hideAutoCard(reason: nil); return }
+        idleWork?.cancel()
         model.phase = .done
         Store.log("agent_done_while_shown", question: model.question?.id)
         let reading = model.question?.closed == true || model.question?.answered == true
@@ -805,9 +951,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
             var skipped = state.skippedByDay[today] ?? []
             if !skipped.contains(q.id) { skipped.append(q.id) }
             state.skippedByDay = [today: skipped]   // 只保留今天
+            // 連續略過：使用者已經表示現在不想被打擾，今天就只通知開獎
+            if state.skipStreakDay != today { state.skipStreak = 0 }
+            state.skipStreakDay = today
+            state.skipStreak += 1
+            let goQuiet = state.skipStreak >= quietAfterSkips && state.quietDay != today
+            if goQuiet { state.quietDay = today }
             Store.save(state, to: "state.json")
+            if goQuiet {
+                Store.log("skipped", question: q.id)
+                Store.log("quiet_today")
+                model.quietToday = true
+                model.pill = false
+                model.quietNotice = true     // 卡片換成一行說明，幾秒後收起
+                idleWork?.cancel()
+                scheduleHide(after: 4)
+                return
+            }
         }
         hideAutoCard(reason: "skipped")
+    }
+
+    /// 取消「今天只通知開獎」
+    func resumeQuiet() {
+        state.quietDay = nil
+        state.skipStreak = 0
+        Store.save(state, to: "state.json")
+        model.quietToday = false
+        Store.log("quiet_resumed")
     }
 
     // 選題：先開獎、再待答題
@@ -821,8 +992,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         if let r = model.feed.results.first(where: { !state.seenResults.contains($0.id) }) { return r }
         let shownToday = state.shownByDay[today] ?? []
         let skippedToday = state.skippedByDay[today] ?? []
+        if state.quietDay == today { return nil }   // 今天只通知開獎
         return model.feed.pending.first { q in
-            !skippedToday.contains(q.id) && (shownToday.contains(q.id) || shownToday.count < dailyLimit)
+            // 自己出的題不跳給自己：出題時已經當場答過，沒答也可以從首頁進去
+            !q.isMine && !skippedToday.contains(q.id) && (shownToday.contains(q.id) || shownToday.count < dailyLimit)
         }
     }
 
@@ -847,6 +1020,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         pendingHide?.cancel()
         model.onboarding = false
         showQuestion(q, remaining: model.feed.pending.filter { $0.id != q.id }.count)
+        // 要打字、要畫圖的題目比較花力氣：先用小邀請卡問一聲，願意才展開
+        model.invite = !q.closed && !q.hasResults && !q.answered && ["text", "draw"].contains(q.qKind)
         model.phase = .working
         lastShown = Date()
         if !q.closed {
@@ -857,18 +1032,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         }
         presentAutoCard()
         Store.log(q.closed ? "result_shown" : "shown", question: q.id,
-                  extra: ["agent": model.agentName].merging(cornerGaps) { $1 })
+                  extra: ["agent": model.agentName, "invite": model.invite].merging(cornerGaps) { $1 })
     }
 
-    func togglePause() {
-        if Date() < pausedUntil {
-            pausedUntil = .distantPast
+    /// 暫停跳出卡片。option：hour（1 小時）、tomorrow（到明天）、forever（直到我恢復）、resume（恢復）
+    func pause(_ option: String) {
+        model.showPauseOptions = false
+        switch option {
+        case "hour": pausedUntil = Date().addingTimeInterval(3600)
+        case "tomorrow":
+            let start = Calendar.current.startOfDay(for: Date())
+            pausedUntil = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? Date().addingTimeInterval(86400)
+        case "forever": pausedUntil = .distantFuture
+        default: pausedUntil = .distantPast
+        }
+        state.pausedUntil = pausedUntil == .distantPast ? nil : pausedUntil.timeIntervalSince1970
+        Store.save(state, to: "state.json")
+        if option == "resume" {
             Store.log("resumed")
         } else {
-            pausedUntil = Date().addingTimeInterval(3600)
             cancelShow()
             hideAutoCard(reason: nil)
-            Store.log("paused")
+            Store.log("paused", extra: ["option": option])
+        }
+    }
+
+    func syncPauseLabel() {
+        model.paused = Date() < pausedUntil
+        guard model.paused else { model.pausedLabel = ""; return }
+        if pausedUntil == .distantFuture {
+            model.pausedLabel = "已暫停"
+        } else if Calendar.current.isDateInToday(pausedUntil) {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm"
+            model.pausedLabel = "已暫停到 \(f.string(from: pausedUntil))"
+        } else {
+            model.pausedLabel = "已暫停到明天"
         }
     }
 
