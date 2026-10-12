@@ -41,13 +41,6 @@ DRAW_WIDTHS = (1, 2)
 MAX_STROKES = 300
 MAX_DRAW_POINTS = 4000
 
-# 新群組的起手題：(問題, 題型, 選項, 評分兩端的說明)
-STARTER_QUESTIONS = [
-    ("這週你主要用哪個 AI Coding Agent？", "choice", ["Codex", "Claude Code", "Cursor", "其他"], None),
-    ("這週工作順不順？", "scale", None, {"low": "很卡", "high": "很順"}),
-    ("Agent 最近做過最蠢的一件事是什麼？", "text", None, None),
-]
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
@@ -76,7 +69,7 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE TABLE IF NOT EXISTS questions (
   id INTEGER PRIMARY KEY,
   group_id INTEGER NOT NULL REFERENCES groups(id),
-  author_id INTEGER REFERENCES users(id),      -- NULL = WhileAI 起手題
+  author_id INTEGER REFERENCES users(id),
   text TEXT NOT NULL,
   options TEXT NOT NULL,                       -- JSON array
   created_at INTEGER NOT NULL,
@@ -165,6 +158,9 @@ class Store:
             for name, ddl in cols:
                 if name not in have:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+        # 舊版會在新群組自動放三題示範題（沒有出題者）。這個功能已移除，把舊資料庫裡留下的也清掉
+        self.db.execute("DELETE FROM votes WHERE question_id IN (SELECT id FROM questions WHERE author_id IS NULL)")
+        self.db.execute("DELETE FROM questions WHERE author_id IS NULL")
         self.db.commit()
 
     # ---------- 使用者 ----------
@@ -224,9 +220,6 @@ class Store:
                               (name, self.new_invite_code(), user["id"], t))
         gid = cur.lastrowid
         self.db.execute("INSERT INTO members (group_id, user_id, joined_at) VALUES (?, ?, ?)", (gid, user["id"], t))
-        # 新群組一開始只有 1–2 人，匿名題（需滿 3 人）永遠不會開獎，所以起手題用具名＋回答後立刻看結果
-        for text, kind, options, config in STARTER_QUESTIONS:
-            self.insert_question(gid, None, text, kind, options, config, False, True, t, 72)
         return gid
 
     def group_row(self, gid):
@@ -406,7 +399,7 @@ class Store:
             "id": qid,
             "group_id": q["group_id"],
             "group_name": group_name or self.group_row(q["group_id"])["name"],
-            "author_name": author["name"] if author else "WhileAI 起手題",
+            "author_name": author["name"] if author else "WhileAI",
             "is_mine": is_mine,
             "text": q["text"],
             "kind": kind,

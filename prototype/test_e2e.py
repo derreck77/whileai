@@ -76,6 +76,8 @@ def main():
             call("POST", f"/api/invites/{g['invite_code']}/join", token=u["token"])
         q = call("POST", f"/api/groups/{g['id']}/questions",
                  {"text": "下個 sprint 要不要統一改用 Codex？", "options": ["要", "不要", "先試一週"]}, kai["token"])
+        # 第二題：第一題開獎後，下一次等待要顯示的待答題
+        call("POST", f"/api/groups/{g['id']}/questions", {"text": "中午吃什麼？", "options": ["便當", "麵"]}, kai["token"])
         json.dump({"token": lin["token"], "name": "小林", "server": BASE}, open(os.path.join(data, "identity.json"), "w"))
 
         app = subprocess.Popen([APP], env=dict(os.environ, WHILEAI_DATA_DIR=data, WHILEAI_SERVER=BASE,
@@ -120,7 +122,18 @@ def main():
         check(last.get("type") == "shown" and last.get("question") != q["id"], "這次顯示的是待答題，不是舊開獎")
         hook("Stop"); time.sleep(3)
 
-        print("6. 隱私")
+        print("6. 沒有待答題時不跳卡片")
+        for u in (kai, mei, lin):
+            for qq in call("GET", f"/api/groups/{g['id']}", token=u["token"])["questions"]:
+                if not qq["closed"] and not qq["my_answered"]:
+                    call("POST", f"/api/questions/{qq['id']}/vote", {"answer": 0}, u["token"])
+        n = len(events(data))
+        hook("UserPromptSubmit"); time.sleep(6)
+        new = [e["type"] for e in events(data)[n:]]
+        check(new in ([], ["result_shown"]), f"所有題目都答完後，不會再跳出待答題（新事件：{new or '無'}）")
+        hook("Stop"); time.sleep(3)
+
+        print("7. 隱私")
         raw = open(os.path.join(data, "events.jsonl")).read() + open(os.path.join(data, "state.json")).read()
         check("機密" not in raw, "hook 送進來的 prompt 沒有出現在任何本機檔案")
     finally:

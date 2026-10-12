@@ -57,7 +57,7 @@ def main():
         s, g = call("POST", "/api/groups", {"name": "後端組"}, A)
         gid, code = g["group"]["id"], g["group"]["invite_code"]
         check(s == 200 and len(code) == 8, f"建立群組，邀請碼 {code}")
-        check(len(g["questions"]) == 3, "新群組自動附 3 題起手題")
+        check(g["questions"] == [], "新群組是空的，沒有自動產生的示範題")
         s, info = call("GET", f"/api/invites/{code}")
         check(s == 200 and info["name"] == "後端組", "不用登入就能看邀請資訊")
         call("POST", f"/api/invites/{code}/join", {}, B)
@@ -70,11 +70,11 @@ def main():
 
         _, solo = call("POST", "/api/users", {"name": "獨行俠"})
         _, sg = call("POST", "/api/groups", {"name": "一人群組"}, solo["token"])
-        starter = next(x for x in sg["questions"] if x["kind"] == "choice")
-        check({x["kind"] for x in sg["questions"]} == {"choice", "scale", "text"}, "起手題包含單選、評分、文字三種題型")
-        _, sv = call("POST", f"/api/questions/{starter['id']}/vote", {"option": 0}, solo["token"])
-        check(not sv["closed"], "群組只有 1 人時，回答起手題不會提早開獎")
-        check(sv["results"] is not None and sv["voters"][0] == ["獨行俠"], "起手題是具名即時：只有 1 人也能立刻看到結果")
+        _, own = call("POST", f"/api/groups/{sg['group']['id']}/questions",
+                      {"text": "一個人也能玩嗎？", "options": ["可以", "不行"], "anonymous": False, "live": True}, solo["token"])
+        _, sv = call("POST", f"/api/questions/{own['id']}/vote", {"answer": 0}, solo["token"])
+        check(not sv["closed"], "群組只有 1 人時，回答自己的題目不會提早開獎")
+        check(sv["results"] == [1, 0] and sv["voters"][0] == ["獨行俠"], "具名即時題：只有 1 人也能立刻看到結果")
 
         print("B. 出題")
         s, err = call("POST", f"/api/groups/{gid}/questions", {"text": "要不要換工具呢？", "options": ["要"]}, A)

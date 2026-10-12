@@ -188,6 +188,7 @@ struct LocalState: Codable {
     var shownByDay: [String: [Int]] = [:]
     var onboardingShown = false
     var lastGroupId: Int?             // 上次出題的群組，下次出題時預設選它
+    var skippedByDay: [String: [Int]] = [:]   // 今天略過的題目：當天不再自動跳出
 
     init() {}
     init(from decoder: Decoder) throws {   // 舊版 state.json 沒有新欄位時用預設值
@@ -196,6 +197,7 @@ struct LocalState: Codable {
         shownByDay = try c.decodeIfPresent([String: [Int]].self, forKey: .shownByDay) ?? [:]
         onboardingShown = try c.decodeIfPresent(Bool.self, forKey: .onboardingShown) ?? false
         lastGroupId = try c.decodeIfPresent(Int.self, forKey: .lastGroupId)
+        skippedByDay = try c.decodeIfPresent([String: [Int]].self, forKey: .skippedByDay) ?? [:]
     }
 }
 

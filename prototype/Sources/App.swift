@@ -28,7 +28,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     var activeSessions: [String: (agent: Agent, last: Date)] = [:]
     // Claude Code 按 Esc 中斷時不會送 Stop；超過這個時間沒有事件的 session 視為已結束
     let staleAfter: TimeInterval = 45 * 60
-    var skippedThisWait = Set<Int>()
     var pendingShow: DispatchWorkItem?
     var pendingHide: DispatchWorkItem?
     var lastShown = Date.distantPast
@@ -732,7 +731,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
 
         switch event {
         case "UserPromptSubmit":
-            if activeSessions.isEmpty { skippedThisWait.removeAll() }
             activeSessions[session] = (agent, Date())
             updateAgentName(fallback: agent)
             refresh { [weak self] in self?.scheduleShow() }
@@ -802,7 +800,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     }
 
     func skipCard() {
-        if let q = model.question, !model.onboarding, !q.closed { skippedThisWait.insert(q.id) }
+        // 略過的題目今天不再自動跳出；想答的話，點 ⏳ 的「待你回答」還是找得到
+        if let q = model.question, !model.onboarding, !q.closed {
+            var skipped = state.skippedByDay[today] ?? []
+            if !skipped.contains(q.id) { skipped.append(q.id) }
+            state.skippedByDay = [today: skipped]   // 只保留今天
+            Store.save(state, to: "state.json")
+        }
         hideAutoCard(reason: "skipped")
     }
 
@@ -816,8 +820,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     func nextQuestion() -> Question? {
         if let r = model.feed.results.first(where: { !state.seenResults.contains($0.id) }) { return r }
         let shownToday = state.shownByDay[today] ?? []
+        let skippedToday = state.skippedByDay[today] ?? []
         return model.feed.pending.first { q in
-            !skippedThisWait.contains(q.id) && (shownToday.contains(q.id) || shownToday.count < dailyLimit)
+            !skippedToday.contains(q.id) && (shownToday.contains(q.id) || shownToday.count < dailyLimit)
         }
     }
 
