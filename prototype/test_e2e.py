@@ -91,6 +91,8 @@ def main():
         hook("UserPromptSubmit")
         last = wait_last(data, lambda e: e["type"] == "shown")
         check(last.get("type") == "shown", f"顯示了待答題（題目 #{last.get('question', '-')}）")
+        check(last.get("gap_right") == 16 and last.get("gap_top") == 12,
+              f"卡片貼在螢幕右上角（離右邊 {last.get('gap_right')}、離上方 {last.get('gap_top')}）")
         hook("Stop")
         last = wait_last(data, lambda e: e["type"] == "agent_done_while_shown")
         check(last.get("type") == "agent_done_while_shown", "Codex 完成時記錄並收起")

@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     var panel: CardPanel!
     var statusItem: NSStatusItem!
     var cancellables = Set<AnyCancellable>()
+    var panelAtCorner = false          // 面板目前是否固定在螢幕右上角（自動卡片）
+    var cornerScreen: NSScreen?
     var clickMonitor: Any?
     var keyMonitor: Any?
 
@@ -126,15 +128,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         host.layoutSubtreeIfNeeded()
         let size = host.fittingSize
         guard size.width > 0, size.height > 0 else { return }
-        let screen = (statusItem.button?.window?.screen ?? NSScreen.main)?.visibleFrame ?? .zero
-        var anchorX = screen.maxX - size.width / 2 - 16
-        var top = screen.maxY - 6
-        if let w = statusItem.button?.window, w.frame.width > 0 {
-            anchorX = w.frame.midX
-            top = w.frame.minY - 6
+        let frame: NSRect
+        if panelAtCorner {
+            // 自動卡片：固定在螢幕右上角，不擋住畫面中間。
+            // 選單列圖示可能落在螢幕中間（圖示多、有瀏海、或全螢幕時），所以不跟著圖示走
+            let screen = (cornerScreen ?? NSScreen.main)?.visibleFrame ?? .zero
+            frame = NSRect(x: screen.maxX - size.width - 16, y: screen.maxY - 12 - size.height,
+                           width: size.width, height: size.height)
+        } else {
+            // 使用者點 ⏳ 打開的面板：掛在圖示正下方
+            let screen = (statusItem.button?.window?.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+            var anchorX = screen.maxX - size.width / 2 - 16
+            var top = screen.maxY - 6
+            if let w = statusItem.button?.window, w.frame.width > 0 {
+                anchorX = w.frame.midX
+                top = w.frame.minY - 6
+            }
+            let x = min(max(anchorX - size.width / 2, screen.minX + 8), screen.maxX - size.width - 8)
+            frame = NSRect(x: x, y: top - size.height, width: size.width, height: size.height)
         }
-        let x = min(max(anchorX - size.width / 2, screen.minX + 8), screen.maxX - size.width - 8)
-        let frame = NSRect(x: x, y: top - size.height, width: size.width, height: size.height)
         guard frame != panel.frame else { return }
         // 已經在畫面上時，高度變化用短動畫，內容增減才不會跳一下
         if panel.isVisible && panel.alphaValue == 1 && abs(frame.width - panel.frame.width) < 1 {
@@ -158,6 +170,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
         model.screen = screen
         prepare(screen)
         let wasVisible = panel.isVisible
+        // 從自動卡片點進來（面板已經在右上角）就留在原地；其他情況掛在圖示下方
+        if !wasVisible { panelAtCorner = false }
         layoutPanel()
         NSApp.activate(ignoringOtherApps: true)
         if wasVisible {
@@ -171,7 +185,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
     }
 
     /// Agent 工作時自動跳出：不搶鍵盤焦點，使用者可以繼續在終端機打字
+    /// 卡片離螢幕右邊、上邊各多遠（只是面板的位置，用來驗證卡片確實貼在右上角）
+    var cornerGaps: [String: Any] {
+        guard let screen = (cornerScreen ?? NSScreen.main)?.visibleFrame else { return [:] }
+        return ["gap_right": Int(screen.maxX - panel.frame.maxX), "gap_top": Int(screen.maxY - panel.frame.maxY)]
+    }
+
     func presentAutoCard() {
+        // 出現在滑鼠所在的那個螢幕（你正在用的螢幕）的右上角
+        panelAtCorner = true
+        cornerScreen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
         model.stack = []
         model.screen = .card
         model.error = nil
@@ -237,9 +260,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
             statusItem.menu = nil
             return
         }
-        if panel.isVisible && !isAutoCard {
+        if panel.isVisible && !isAutoCard && !panelAtCorner {
             closePanel()
         } else {
+            if panel.isVisible { panel.orderOut(nil) }   // 先收起右上角的卡片，再從圖示下方打開
             openPanel(identity == nil ? .welcome : .home)
         }
     }
@@ -827,7 +851,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, PanelActions {
             Store.save(state, to: "state.json")
         }
         presentAutoCard()
-        Store.log(q.closed ? "result_shown" : "shown", question: q.id, extra: ["agent": model.agentName])
+        Store.log(q.closed ? "result_shown" : "shown", question: q.id,
+                  extra: ["agent": model.agentName].merging(cornerGaps) { $1 })
     }
 
     func togglePause() {
